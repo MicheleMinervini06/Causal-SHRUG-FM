@@ -1337,6 +1337,7 @@ dependencies = [
 
 [package.optional-dependencies]
 encoder = [
+    { name = "pyyaml" },
     { name = "timm" },
     { name = "torch", version = "2.15.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
     { name = "torch", version = "2.15.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
@@ -1348,6 +1349,7 @@ encoder = [
 requires-dist = [
     { name = "matplotlib", specifier = ">=3.11.2" },
     { name = "numpy", specifier = ">=2.4.6" },
+    { name = "pyyaml", marker = "extra == 'encoder'", specifier = ">=6,<7" },
     { name = "rasterio", specifier = ">=1.4.4" },
     { name = "timm", marker = "extra == 'encoder'", specifier = ">=1.0,<2" },
     { name = "torch", marker = "extra == 'encoder'", specifier = ">=2.7,<3", index = "https://download.pytorch.org/whl/cpu" },

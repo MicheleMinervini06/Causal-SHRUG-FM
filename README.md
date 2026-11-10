@@ -370,6 +370,139 @@ loader's random image rotations/flips before the encoder. Rotating a feature gri
 is not equivalent to re-encoding a rotated image. Later decoder training must use
 this canonical-input setup or explicitly cache additional input augmentations.
 Feed cached grids directly to `CoreDecoder`; `SSL4EO.decode` instead expects the
-full token sequence. Labels/validity masks stay on their native grid and will be
-handled by the later decoder-training and prediction scripts. This remains a
-Sen1Floods11 adaptation of the WorldFloods experiment.
+full token sequence. Labels/validity masks stay on their native grid. This remains
+a Sen1Floods11 adaptation of the WorldFloods experiment.
+
+## Train the segmentation decoder
+
+`scripts/train_segmentation_head.py` imports the **unchanged original
+`CoreDecoder`** from `src/signal_task/models/model_components/decoder.py`, using
+the SSL4EO wrapper's explicit settings, rather than the generic decoder defaults:
+
+| Stage | Channels | Spatial grid |
+| --- | --- | --- |
+| Cached encoder features | 384 | 14 x 14 |
+| CNN bridge | 1280 | 14 x 14 |
+| Upsampling block 1 | 640 | 28 x 28 |
+| Upsampling block 2 | 320 | 56 x 56 |
+| Upsampling block 3 | 160 | 112 x 112 |
+| Upsampling block 4 | 160 | 224 x 224 |
+| Classification head | 2 | 224 x 224 |
+
+Depths are `[2,2,8,2]`, dimensions `[160,320,640,1280]`, with BatchNorm,
+ReLU, same padding, residual/channel-attention blocks, and zero dropout.
+There are **41,268,162 trainable decoder parameters**; no architecture is reduced
+for debugging. The script does not instantiate the encoder or update its weights.
+The optional `encoder` uv extra supplies the runtime; PyYAML is an explicit
+dependency because the original decoder's utility module imports it.
+
+Commands to run when ready (implementation tests do not execute these runs):
+
+```sh
+uv run --locked --extra encoder scripts/train_segmentation_head.py --debug
+uv run --locked --extra encoder scripts/train_segmentation_head.py --seed 0
+```
+
+`--debug` uses one epoch, the first two available patches in each of train and
+validation, and at most one batch per split. It still runs the complete, large
+decoder; it checks plumbing and produces an explicitly marked debug checkpoint,
+not a meaningful trained model. The default output is
+`models/segmentation/core_decoder_seed-0-debug/`; a full run uses
+`models/segmentation/core_decoder_seed-0/`. Existing nonempty output directories
+are rejected. Use `--output PATH` for another run.
+
+Before optimization, the script verifies the complete index against the current
+manifest/audit and prepares **only train and validation** samples. Image/label
+hashes include validity sidecars; NPZ hashes, identities, shape, payload hashes
+and encoder/preprocessing contracts are checked. Training samples retain the
+native reference grid and audited support (`joint` by default). Invalid targets
+are `-1`; reference labels are never interpolated. Only output logits are resized
+with bilinear interpolation (`align_corners=False`) to each native mask grid.
+
+Loss is unweighted two-class cross-entropy, summed over valid pixels and divided
+by their count per batch. Epoch losses are weighted by valid-pixel counts. This
+deliberately replaces SHRUG-FM's configured Dice loss. Water is class `1` and
+non-water class `0`. F1 and IoU aggregate TP/FP/FN over all valid pixels in the
+split, at a fixed 0.5 water threshold. They are **micro pixel metrics**, not mean
+patch scores. When both reference and prediction contain no water, F1/IoU are
+undefined (JSON `null`, blank CSV); a completely invalid patch is rejected.
+
+Defaults retain the flood configuration's AdamW optimizer, learning rate
+`5e-5`, weight decay `5e-6`, batch size 1, 50 epochs, 3 warmup epochs, and patience
+5. Warmup starts at **0.1 times the learning rate**, then rises linearly to the
+full rate and stays constant. This is an explicit numerical change from the legacy
+trainer's `start_factor=lr/100`, which would start at `2.5e-11` with these defaults.
+There are no random input augmentations, because the cache contains canonical
+images. These loss, warmup, support and dataset choices mean this is an adaptation,
+not an exact reproduction of the WorldFloods training experiment.
+
+The best head maximizes **validation water IoU**; exact ties use lower validation
+cross-entropy. Test and Bolivia are never loaded for fitting/checkpoint selection.
+The current usable cohort is train 250, validation 86, test 88, Bolivia holdout 15.
+Original main splits share events: this is not an event-disjoint evaluation.
+Patch/event IDs and original split membership are retained.
+
+Training writes `best_head.pt`, `history.csv`, `config.json`, and
+`training_summary.json`. Checkpoints record the seed, selected patch/event IDs,
+architecture, source hashes (LF/CRLF normalized), cache/checkpoint/preprocessing
+contract, data hashes, versions, and validation metrics. Training is float32,
+seeded, with deterministic algorithms and TF32 disabled. Exact bitwise equality
+across devices/software versions is not promised. There is no resume mode yet.
+Prepared features and compact native targets are kept in CPU memory, and the
+decoder/optimizer require substantial additional memory. CPU is the default;
+`--device cuda` on Anunna requires a deliberately configured CUDA PyTorch
+environment, since this project's current uv index selects CPU wheels.
+
+## Export segmentation predictions and water fractions
+
+```sh
+uv run --locked --extra encoder scripts/predict_segmentation.py --checkpoint models/segmentation/core_decoder_seed-0/best_head.pt
+```
+
+The default evaluates all usable cached patches, retaining their original split
+and event IDs. To export held-out patches only, append
+`--splits test bolivia_holdout`. Train predictions are in-sample; validation
+predictions come from the split used to select the head. Keep these distinctions
+when using fractions in later causal experiments. No threshold search is done.
+
+Prediction loads the head with `weights_only=True` and strict state-dict loading,
+and requires its recorded encoder/cache/index/audit/support contract to match.
+The encoder is represented by the verified cached features and is not rerun.
+The decoder runs in evaluation/inference mode. It resizes **logits first**, then
+applies two-class softmax to obtain foreground probabilities. Water is predicted
+where `p_water >= 0.5` (configurable as one fixed `--threshold` for the whole run).
+Both reference and predicted water fractions divide water-pixel counts by exactly
+the same native valid-pixel count. Signed error is prediction minus reference.
+
+Default output is `results/segmentation_predictions/seed-0/`:
+
+```text
+probabilities/<patch_id>.tif  # Float32 water probability on the native label grid
+masks/<patch_id>.tif          # Int16: 0 non-water, 1 water, -1 invalid
+predictions.csv
+prediction_config.json
+prediction_summary.json      # Counts and aggregate pixel metrics per split
+```
+
+Rasters preserve the label CRS/affine transform. These are evaluation exports:
+outside the reference valid support, probabilities are NoData `NaN` and masks
+are `-1`. They do not supply predictions for unknown/invalid reference pixels.
+TIFF tags and JSON preserve head/checkpoint/cache hashes, seed, threshold and IDs.
+CSV paths are relative to the prediction output directory. The table contains:
+
+```text
+patch_id,event_id,original_split,model_seed,reference_fraction,predicted_fraction,
+signed_fraction_error,absolute_fraction_error,n_valid_pixels,F1,IoU,
+probability_path,mask_path,threshold
+```
+
+`--limit N` supports a small prediction plumbing check. Debug heads require
+`--allow-debug-head` and use a separate default output folder. Neither a debug
+run nor a complete training/prediction run is launched automatically.
+
+Implementation checks (tiny synthetic fixtures, plus an original-decoder forward
+shape check; no dataset training):
+
+```sh
+uv run --locked --extra encoder python -B -m unittest discover -s tests -v
+```

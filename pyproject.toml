@@ -12,6 +12,7 @@ dependencies = [
 
 [project.optional-dependencies]
 encoder = [
+    "pyyaml>=6,<7",
     "timm>=1.0,<2",
     "torch>=2.7,<3",
     "torchvision>=0.22,<1",
