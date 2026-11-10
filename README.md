@@ -166,6 +166,75 @@ water fraction, even if the raster does not declare it as NoData.
 References: [Rasterio quickstart](https://rasterio.readthedocs.io/en/stable/quickstart.html)
 and [Sen1Floods11 dataset conventions](https://github.com/cloudtostreet/Sen1Floods11#dataset-information).
 
+## Inspect the full segmentation dataset before decoder training
+
+```sh
+uv run experiments/inspect_segmentation_data.py
+```
+
+This reads `data/sen1floods11/manifest.csv`, verifies every listed pair, and saves
+an audit under `results/segmentation_data`. It runs on CPU with the existing base
+dependencies; encoder weights and the optional encoder runtime are unnecessary.
+Use `--manifest PATH`, `--output PATH`, or `--examples N` to override defaults.
+A notebook is optional: the script produces the tables and figures needed for
+interactive follow-up while keeping the underlying checks reproducible.
+
+Checks include IDs, duplicate paths/patches, file existence/readability, 512x512
+dimensions, 13-band order, single-band labels, CRS/bounds/affine alignment, label
+values, GDAL validity masks, and finite values. When available, local official
+split CSVs are cross-checked against the manifest. Affine grids are compared with
+an explicit tolerance of `0.0001` pixels so harmless coordinate roundoff is
+accepted. No raster is changed, cropped, resized, normalized or remapped.
+
+The default reference confounder is:
+
+```text
+C_i = water pixels / valid pixels
+valid = known label (0 or 1) AND GDAL-valid label
+        AND GDAL-valid, finite observations in every image band
+```
+
+Label value `-1` is explicitly ignored, even when the GeoTIFF declares no NoData.
+Both `label_water_fraction` (label support alone) and `joint_water_fraction` are
+saved. `reference_water_fraction` uses joint support by default; `--support label`
+selects label support for an alternate audit. Always match future predictions and
+references on the same support. These are native-grid pixel fractions, not exact
+geodesic area fractions or a measure of newly flooded land. Validity does not
+provide an additional cloud/shadow quality mask.
+
+Outputs include:
+
+- `patches.csv`: one row per manifest entry, properties, both support counts and
+  fractions, usability, and error/warning flags. Missing/unusable fractions remain
+  empty rather than being converted to zero.
+- `by_event.csv`, `by_split.csv`, `by_event_split.csv`: all/usable patch counts,
+  mean, sample SD, quantiles, range, zero/one counts, and pooled water fractions.
+  Patch means and valid-pixel-weighted pooled fractions are distinct quantities.
+- `water_fraction_distributions.png` and `rgb_mask_examples.png`: distributions
+  and deterministic examples covering original splits and fraction variation.
+  RGB stretching is display-only; masks show the chosen reference support.
+- `cross_split_bbox_intersections.csv`: possible geographic overlap within an
+  event across splits, for review rather than automatic exclusion.
+- `inspection_summary.json` and `report.md`: configuration/provenance, findings,
+  shared-event warnings, and interpretation.
+
+All-water and all-non-water patches are retained when otherwise valid. Empty
+image/label/joint support is unusable. Less than 10% valid support is a descriptive
+warning, not an exclusion rule. The script preserves the official splits and
+reports events shared between them; patch counts do not equal independent event
+counts. Original splits can support decoder comparisons, but causal calibration
+and evaluation will need an explicit plan for dependent patches.
+
+Reuse/method check: RGB stretching, mask colours and class labels are reused from
+`experiments/inspect_raster_pair.py`. SHRUG-FM's
+`src/signal_task/dataset/floods/dataset.py` targets **WorldFloods**, with a two-band
+source mask mapped to `0/1/2`; our **Sen1Floods11** source mask is one band with
+`-1/0/1`. That loader and the tester's raw `GT_Area` sum cannot be used unchanged
+for this inspection. Before decoder training, review the existing `CoreDecoder`
+in `src/signal_task/models/model_components/decoder.py`, the frozen-encoder wiring
+in `src/signal_task/models/model_ssl4eo.py`, and training normalization/loss settings. This audit
+does not train a decoder or constitute a dataset-identical SHRUG-FM reproduction.
+
 ## Acquire the SSL4EO-S12 MoCo encoder
 
 `scripts/get_ssl4eo_encoder.py` downloads a pinned SSL4EO-S12 MoCo ViT-S/16
