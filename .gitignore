@@ -6,6 +6,7 @@ data/**
 !data/.gitkeep # Except the .gitkeep file to keep the directory in version control
 **/*.pt
 **/*.pth
+/models/
 src/fm_extremes_uncertainty/wandb/*
 wandb/*
 results/*

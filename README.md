@@ -165,3 +165,64 @@ water fraction, even if the raster does not declare it as NoData.
 
 References: [Rasterio quickstart](https://rasterio.readthedocs.io/en/stable/quickstart.html)
 and [Sen1Floods11 dataset conventions](https://github.com/cloudtostreet/Sen1Floods11#dataset-information).
+
+## Acquire the SSL4EO-S12 MoCo encoder
+
+`scripts/get_ssl4eo_encoder.py` downloads a pinned SSL4EO-S12 MoCo ViT-S/16
+checkpoint. Its default destination is this project's `models/ssl4eo-s12-moco`,
+resolved relative to the script. Model artifacts and reports are ignored by Git.
+
+Inspect the plan without network access or file writes, then download when ready:
+
+```sh
+uv run scripts/get_ssl4eo_encoder.py --dry-run
+uv run scripts/get_ssl4eo_encoder.py
+```
+
+The script verifies the expected 90,668,909 bytes (about 86.5 MiB) and full SHA-256,
+reuses an existing checkpoint only if both match, and replaces temporary downloads
+only after verification. Source repository, revision, URL, band order, checksum,
+and license are recorded in `checkpoint_metadata.json`. `--output PATH` overrides
+the destination. To verify an existing file without downloading or writing:
+
+```sh
+uv run scripts/get_ssl4eo_encoder.py --verify-only
+```
+
+Download-only and verification modes use the standard library. Loading and
+forward-pass checks use the optional `encoder` extra (PyTorch, torchvision, timm),
+locked in `uv.lock`. The project selects the official CPU PyTorch index for this
+local check. Install/run that extra explicitly:
+
+```sh
+uv sync --extra encoder --locked
+uv run --extra encoder scripts/get_ssl4eo_encoder.py --check
+uv run --extra encoder scripts/get_ssl4eo_encoder.py --image data/sen1floods11/images/Bolivia_103757_S2Hand.tif
+```
+
+`--check` uses a seeded synthetic input; `--image` implies a check on a real raster.
+Use `--extra encoder` for encoder commands so uv retains the optional runtime.
+CPU is the default; `--threads` controls CPU threads. `--device cuda` requires a
+CUDA-enabled PyTorch environment, which the configured CPU extra does not provide.
+
+The reusable `load_encoder(checkpoint, device="cpu")` function verifies the local
+file, uses `torch.load(weights_only=True)` and strict state-dict loading, and
+returns a frozen model in evaluation mode. It does not download anything. Expected
+input is `[B,13,224,224]`; `forward_features` returns `[B,197,384]`, with one CLS
+token `[B,384]` and 196 patch tokens `[B,196,384]`. It has no water-segmentation head.
+The optional smoke check records versions, shapes and finite-feature checks in
+`encoder_check.json`; it does not save a dataset of embeddings or predictions.
+
+Real-image checks verify the 13-band order when descriptions are present and
+record valid-pixel fraction. They retain the supplied script's **smoke-test-only**
+preprocessing: divide by 10,000, clip to `[0,1]`, and resize the full patch to
+224x224. This still includes image NoData and is not the documented TorchGeo
+weight transform (resize to 256, center-crop to 224, divide by 10,000). Choose
+preprocessing and matching label support before evaluating measurements. A
+successful forward pass alone does not validate either choice.
+
+This script uses MoCo explicitly. The legacy embedding exporter still defaults
+to MAE; acquiring these weights does not reconfigure that pipeline.
+Sources: [pinned checkpoint](https://huggingface.co/torchgeo/vit_small_patch16_224_sentinel2_all_moco/tree/1cb683f6c14739634cdfaaceb076529adf898c74),
+[TorchGeo weights/transforms](https://docs.torchgeo.org/en/v0.7.1/_modules/torchgeo/models/vit.html),
+and [uv PyTorch configuration](https://docs.astral.sh/uv/guides/integration/pytorch/).
