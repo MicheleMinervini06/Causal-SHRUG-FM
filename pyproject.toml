@@ -1,0 +1,11 @@
+[project]
+name = "shrug-fm-causal-benchmark"
+version = "0.1.0"
+description = "Synthetic causal measurement-error experiments for SHRUG-FM"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+package = false
+cache-dir = ".uv-cache"
