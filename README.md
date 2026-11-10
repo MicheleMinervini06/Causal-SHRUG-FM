@@ -206,7 +206,8 @@ Outputs include:
 
 - `patches.csv`: one row per manifest entry, properties, both support counts and
   fractions, usability, and error/warning flags. Missing/unusable fractions remain
-  empty rather than being converted to zero.
+  empty rather than being converted to zero. Raster and GDAL-sidecar SHA-256
+  fingerprints let later steps detect changes since inspection.
 - `by_event.csv`, `by_split.csv`, `by_event_split.csv`: all/usable patch counts,
   mean, sample SD, quantiles, range, zero/one counts, and pooled water fractions.
   Patch means and valid-pixel-weighted pooled fractions are distinct quantities.
@@ -295,3 +296,80 @@ to MAE; acquiring these weights does not reconfigure that pipeline.
 Sources: [pinned checkpoint](https://huggingface.co/torchgeo/vit_small_patch16_224_sentinel2_all_moco/tree/1cb683f6c14739634cdfaaceb076529adf898c74),
 [TorchGeo weights/transforms](https://docs.torchgeo.org/en/v0.7.1/_modules/torchgeo/models/vit.html),
 and [uv PyTorch configuration](https://docs.astral.sh/uv/guides/integration/pytorch/).
+
+## Cache frozen encoder features
+
+```sh
+uv run --extra encoder scripts/cache_encoder_features.py --dry-run
+uv run --extra encoder scripts/cache_encoder_features.py --limit 2
+uv run --extra encoder scripts/cache_encoder_features.py
+```
+
+The script loads the verified local checkpoint through the existing
+`load_encoder` helper and uses the usable cohort from the segmentation audit.
+It never downloads weights. An older audit without source hashes must first be
+regenerated with `uv run experiments/inspect_segmentation_data.py`. Missing,
+changed or mismatched images/labels/validity sidecars require a refreshed audit.
+
+The single canonical preprocessing procedure is `shrug_flood_full_patch_v1`:
+
+1. Read all 13 Sentinel-2 bands in verified B1...B12 order (including B8A).
+2. Fill GDAL-invalid/nonfinite values with raw zero, independently per band.
+3. Standardize in float32 with the fixed 13 means/SDs in
+   `src/config/dataset.toml`, `flood.train.normalization`.
+4. Resize the full patch to 224x224 with PyTorch `nearest-exact` interpolation.
+   No cropping, clipping, division by 10,000, or random augmentation is applied.
+
+This follows the normalization/resize pattern in SHRUG-FM's flood loader and
+preserves the full spatial extent for native-grid targets. The fixed statistics
+match the [ml4floods all-band normalization](https://github.com/spaceml-org/ml4floods/blob/main/ml4floods/data/worldfloods/configs.py);
+no statistics are fitted on our train/test data. It deliberately differs from the
+earlier forward-pass smoke transform and TorchGeo's generic center-crop transform.
+NoData fill affects encoder context; those pixels remain excluded from downstream
+reference/prediction fractions and losses using the original masks.
+
+The model is frozen and in evaluation/inference mode, with float32 computation,
+autocast disabled, and highest matmul precision. The spatial layout exactly matches
+`SSL4EO.forward/reshape`: remove the CLS token, permute channels, then reshape the
+196 row-major spatial tokens into `[384,14,14]`. The legacy `CreateEmbeddings`
+exporter saves CLS only and cannot provide this decoder input.
+
+Default output: `data/sen1floods11/encoder_features/ssl4eo-s12-moco/`:
+
+```text
+cache_config.json        # Full preprocessing, checkpoint, code/runtime fingerprint
+patches/<patch_id>.npz   # spatial_features [384,14,14], cls_embedding [384], metadata
+feature_manifest.csv    # Patch/event/split IDs, image/label paths and SHA-256 hashes
+cls_embeddings.npz      # CLS matrix [N,384], aligned patch/event/split arrays, metadata
+cache_summary.json      # Selection, skipped patches, provenance and reuse counts
+```
+
+Per-patch NPZ metadata includes the checkpoint hash, complete preprocessing/runtime
+contract, source image/sidecar hashes, native grid geometry, and payload hashes.
+Archives use numeric arrays and JSON strings and load with `allow_pickle=False`.
+The CLS embedding is separate from spatial features and is also exported as a
+standalone aligned matrix for embedding-space analysis. Label content is never
+fed into the encoder; refreshed labels can reuse unchanged image features.
+
+Compatible cache files are reused without loading/running the encoder. Shape,
+dtype, finiteness, payload corruption, source identity, and checkpoint/preprocessing/
+runtime compatibility are checked. An incompatible root configuration requires
+a new `--output` directory. `--rebuild-incompatible` explicitly replaces individual
+stale/corrupt derived files after the audit has been refreshed. Writes are atomic
+per file, so interrupted runs can reuse completed patches. A failed run does not
+publish a new index of incomplete results.
+
+Limited runs write `feature_manifest.limit-N.csv`, `cls_embeddings.limit-N.npz`,
+and `cache_summary.limit-N.json`, preserving a full run's index. Cached patches
+are shared between limited and full runs. `--batch-size` and `--threads` control
+execution; CPU is the default. Runtime/device and implementation changes are
+conservatively treated as cache incompatibilities.
+
+**Training implication:** one canonical cached grid cannot reproduce the original
+loader's random image rotations/flips before the encoder. Rotating a feature grid
+is not equivalent to re-encoding a rotated image. Later decoder training must use
+this canonical-input setup or explicitly cache additional input augmentations.
+Feed cached grids directly to `CoreDecoder`; `SSL4EO.decode` instead expects the
+full token sequence. Labels/validity masks stay on their native grid and will be
+handled by the later decoder-training and prediction scripts. This remains a
+Sen1Floods11 adaptation of the WorldFloods experiment.

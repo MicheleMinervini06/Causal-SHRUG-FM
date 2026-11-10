@@ -31,6 +31,7 @@ SPLIT_FILES = {
 }
 BANDS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B9", "B10", "B11", "B12")
 METRIC_FIELDS = (
+    "image_sha256", "label_sha256", "image_files_sha256", "label_files_sha256",
     "image_exists", "label_exists", "image_width", "image_height", "label_width", "label_height",
     "image_bands", "label_bands", "image_dtypes", "label_dtypes", "band_descriptions",
     "image_crs", "label_crs", "image_transform", "label_transform", "image_bounds", "label_bounds",
@@ -41,6 +42,21 @@ METRIC_FIELDS = (
     "label_water_fraction", "joint_water_fraction", "reference_valid_pixels",
     "reference_water_pixels", "reference_water_fraction", "valid_fraction",
 )
+
+
+def dataset_file_hashes(dataset) -> dict[str, str]:
+    """Fingerprint the raster and GDAL sidecars that may change its validity."""
+    parent = Path(dataset.name).resolve().parent
+    fingerprints = {}
+    for filename in dataset.files:
+        path = Path(filename).resolve()
+        name = path.relative_to(parent).as_posix()
+        checksum = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                checksum.update(block)
+        fingerprints[name] = checksum.hexdigest()
+    return fingerprints
 
 
 def local_path(root: Path, value: str) -> Path:
@@ -165,7 +181,10 @@ def inspect_pair(source: dict, *, support="joint", grid_tolerance=1e-4,
     try:
         with rasterio.open(image_path) as image, rasterio.open(label_path) as label:
             for name, dataset in (("image", image), ("label", label)):
+                fingerprints = dataset_file_hashes(dataset)
                 record.update({
+                    f"{name}_files_sha256": fingerprints,
+                    f"{name}_sha256": fingerprints[Path(dataset.name).name],
                     f"{name}_width": dataset.width, f"{name}_height": dataset.height,
                     f"{name}_bands": dataset.count, f"{name}_dtypes": list(dataset.dtypes),
                     f"{name}_crs": str(dataset.crs) if dataset.crs else None,
@@ -482,6 +501,7 @@ def run_inspection(manifest: Path, output: Path, *, support="joint", examples=6,
              ("event_id", "patch_id_a", "split_a", "patch_id_b", "split_b"))
     example_ids = plot_outputs(records, sources, output, examples, support)
     report = {
+        "inspection_schema_version": 2,
         "manifest": str(manifest), "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
         "inspected_at_utc": datetime.now(timezone.utc).isoformat(), "reference_support": support,
         "grid_tolerance_pixels": grid_tolerance, "expected_patch_size": expected_size,
