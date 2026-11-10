@@ -261,8 +261,9 @@ uv run scripts/get_ssl4eo_encoder.py --verify-only
 
 Download-only and verification modes use the standard library. Loading and
 forward-pass checks use the optional `encoder` extra (PyTorch, torchvision, timm),
-locked in `uv.lock`. The project selects the official CPU PyTorch index for this
-local check. Install/run that extra explicitly:
+locked in `uv.lock`. This extra selects the official CPU PyTorch index for local
+checks; `encoder-cuda` selects CUDA 12.8 for NVIDIA GPU work (see below).
+Install/run the CPU extra explicitly:
 
 ```sh
 uv sync --extra encoder --locked
@@ -271,9 +272,9 @@ uv run --extra encoder scripts/get_ssl4eo_encoder.py --image data/sen1floods11/i
 ```
 
 `--check` uses a seeded synthetic input; `--image` implies a check on a real raster.
-Use `--extra encoder` for encoder commands so uv retains the optional runtime.
-CPU is the default; `--threads` controls CPU threads. `--device cuda` requires a
-CUDA-enabled PyTorch environment, which the configured CPU extra does not provide.
+Use the same selected extra on every `uv run` so uv retains that backend.
+CPU is the script default; `--threads` controls CPU threads. For NVIDIA GPU work,
+use `--extra encoder-cuda` together with `--device cuda`.
 
 The reusable `load_encoder(checkpoint, device="cpu")` function verifies the local
 file, uses `torch.load(weights_only=True)` and strict state-dict loading, and
@@ -449,9 +450,9 @@ contract, data hashes, versions, and validation metrics. Training is float32,
 seeded, with deterministic algorithms and TF32 disabled. Exact bitwise equality
 across devices/software versions is not promised. There is no resume mode yet.
 Prepared features and compact native targets are kept in CPU memory, and the
-decoder/optimizer require substantial additional memory. CPU is the default;
-`--device cuda` on Anunna requires a deliberately configured CUDA PyTorch
-environment, since this project's current uv index selects CPU wheels.
+decoder/optimizer require substantial additional memory. CPU is the script
+default; on Anunna select the `encoder-cuda` uv extra and `--device cuda`, as
+described below.
 
 ## Export segmentation predictions and water fractions
 
@@ -506,3 +507,73 @@ shape check; no dataset training):
 ```sh
 uv run --locked --extra encoder python -B -m unittest discover -s tests -v
 ```
+
+## CPU and Anunna CUDA environments with uv
+
+Choose **one** of these mutually exclusive extras. Both are resolved in `uv.lock`:
+
+| Extra | PyTorch index | Currently locked torch / torchvision |
+| --- | --- | --- |
+| `encoder` | CPU | `2.15.0+cpu` / `0.29.2+cpu` on Windows/Linux |
+| `encoder-cuda` | CUDA 12.8 (`cu128`) | `2.11.0+cu128` / `0.26.0+cu128` |
+
+Each extra includes the same timm/PyYAML dependencies. CUDA wheels are for NVIDIA
+GPUs on supported Linux/Windows systems, not AMD GPUs or macOS. The two indexes
+provide different available versions, so the GPU runtime is deliberately recorded
+separately from the existing CPU runtime. Training/prediction configurations also
+record their actual runtime versions. This configuration does not verify Anunna's
+driver or execute a GPU operation; check on an allocated GPU node before training.
+
+Local CPU commands remain:
+
+```sh
+uv sync --locked --extra encoder
+uv run --locked --extra encoder scripts/train_segmentation_head.py --debug
+```
+
+On Anunna, place the project on your assigned **Lustre** working storage and
+create a fresh Linux `.venv` there. Transfer code/data/features/audit reports;
+do not transfer the Windows `.venv` or `.uv-cache`. Build the environment in an
+interactive compute allocation, not on the login node. An example NVIDIA A100
+allocation for setup/checks is:
+
+```sh
+sinteractive -p gpu --gres=gpu:1 --constraint='nvidia&A100' -c 4 --mem=16G --time=00:30:00
+module load 2025 uv
+# Change into the transferred project directory on your assigned Lustre storage.
+uv sync --locked --extra encoder-cuda
+```
+
+The Anunna uv module configures its cache on Lustre (`UV_CACHE_DIR` takes
+precedence over the project's `.uv-cache` default). It also loads Python 3.13,
+matching this project's `.python-version`. Verify the GPU runtime in that same
+allocation:
+
+```sh
+nvidia-smi
+uv run --locked --extra encoder-cuda python -c "import torch; print(torch.__version__, torch.version.cuda); assert torch.cuda.is_available(), 'CUDA unavailable: check GPU allocation and NVIDIA driver'; print(torch.cuda.get_device_name(0)); print(torch.ones(1, device='cuda').sum().item())"
+```
+
+When ready, the short training check is:
+
+```sh
+uv run --locked --extra encoder-cuda scripts/train_segmentation_head.py --device cuda --debug
+```
+
+For full training, use an `sbatch` job and omit `--debug`. Prepare the environment
+once beforehand; load `2025 uv` inside the job and use
+`uv run --no-sync --extra encoder-cuda ... --device cuda` to use that prepared
+environment without installing packages during the job. These are instructions,
+not jobs launched by this repository update.
+
+Always keep `--extra encoder-cuda` on CUDA commands: using `--extra encoder` would
+switch `.venv` back to CPU packages. Combining them (including `--all-extras`) is
+rejected. Base benchmark commands still need no extra. Existing CPU-generated
+cached features can be consumed by the CUDA decoder trainer; generating a new
+cache under CUDA changes its runtime/device fingerprint and needs a separate
+cache output directory.
+
+References: [uv's mutually exclusive PyTorch extras](https://docs.astral.sh/uv/guides/integration/pytorch/#configuring-accelerators-with-optional-dependencies),
+[Anunna uv setup](https://wiki.anunna.wur.nl/Uv),
+[Anunna GPU allocations](https://wiki.anunna.wur.nl/Compute_Nodes),
+and [batch jobs](https://wiki.anunna.wur.nl/Batch_Jobs).
