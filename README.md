@@ -26,8 +26,8 @@ The project pins Python 3.13 in `.python-version`:
 uv sync --locked
 ```
 
-Run the standalone benchmark in that environment; no third-party packages,
-datasets, weights, or GPU are currently required:
+Run the standalone benchmark in that environment. The synthetic benchmark itself
+uses only the Python standard library; no datasets, weights, or GPU are required:
 
 ```sh
 uv run experiments/synthetic_confounder.py
@@ -95,3 +95,73 @@ Commit `pyproject.toml`, `uv.lock`, and `.python-version`; `.venv` and the local
 uv cache are ignored. `uv run` uses the environment without manual activation.
 The original FM pipeline's `environment.yml` remains its separate dependency
 specification; the uv environment currently covers the causal benchmark.
+
+## Download the hand-labelled Sentinel-2 subset
+
+The adapted downloader is `scripts/download_sen1floods11.py`. It uses the Python
+standard library through the project's uv environment; no additional packages,
+Google Cloud CLI, or cloud credentials are needed.
+
+First inspect the public inventory, official splits, and expected download size:
+
+```sh
+uv run scripts/download_sen1floods11.py --dry-run
+```
+
+The dry run reads object metadata and small split CSVs, downloads no rasters, and
+writes no files. To download a small sample or the complete labelled S2 subset:
+
+```sh
+uv run scripts/download_sen1floods11.py --limit 2
+uv run scripts/download_sen1floods11.py
+```
+
+The default destination is this project's `data/sen1floods11`, resolved relative
+to the script rather than the current working directory. `--output PATH` overrides
+it; `--workers 1` through `--workers 16` controls concurrency (default 4).
+
+```text
+data/sen1floods11/
+  images/             # S2Hand GeoTIFFs
+  labels/             # LabelHand GeoTIFFs
+  splits/             # Official train, validation, test, Bolivia-holdout CSVs
+  metadata/           # Event metadata GeoJSON
+  manifest.csv        # Patch/event IDs, original splits and relative file paths
+  download_manifest.json  # Object generations, sizes, checksums and selection
+```
+
+Existing TIFFs are reused only after checking their byte size and published MD5.
+Downloads use temporary files, retries, and replacement only after verification.
+Rerun the same command after an interrupted download to reuse verified completed
+files. Incomplete files restart from the beginning. Manifests describe the current
+selection; `--limit` chooses the first N sorted patch IDs and does not delete other
+local files. Official splits, including the Bolivia holdout, remain distinct.
+
+This downloads **hand-labelled Sentinel-2 images and reference masks**, not all
+Sen1Floods11 layers. Sentinel-1 and weakly labelled subsets are outside its scope.
+See the [dataset structure](https://github.com/cloudtostreet/Sen1Floods11/blob/master/docs/README.md).
+The downloader verifies files and pairing; inspect raster alignment and valid
+pixels separately with the Rasterio script below. Downloaded data is ignored by Git.
+
+## Inspect the local image and label
+
+The Rasterio example opens the Sen1Floods11 image and label in `data/sen1floods11`,
+prints their metadata and label counts, checks their grids, and saves a preview:
+
+```sh
+uv run experiments/inspect_raster_pair.py
+uv run experiments/inspect_raster_pair.py --show
+```
+
+The output is `results/sen1floods11/Bolivia_103757_preview.png`. `--show` also opens
+a Matplotlib window. Alternate files can be supplied with `--image` and `--mask`.
+This example uses NumPy, Rasterio and Matplotlib, managed with uv.
+
+Rasterio uses 1-based band indices: RGB bands `4 3 2` select Sentinel-2 B4/B3/B2.
+The 2-98% contrast stretch affects the display only. For the mask, `-1` means
+ignored/invalid, `0` means not water, and `1` means water. Water does not necessarily
+mean newly flooded land. The example explicitly excludes `-1` when computing
+water fraction, even if the raster does not declare it as NoData.
+
+References: [Rasterio quickstart](https://rasterio.readthedocs.io/en/stable/quickstart.html)
+and [Sen1Floods11 dataset conventions](https://github.com/cloudtostreet/Sen1Floods11#dataset-information).

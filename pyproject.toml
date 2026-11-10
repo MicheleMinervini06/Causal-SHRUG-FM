@@ -4,7 +4,11 @@ version = "0.1.0"
 description = "Synthetic causal measurement-error experiments for SHRUG-FM"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "matplotlib>=3.11.2",
+    "numpy>=2.4.6",
+    "rasterio>=1.4.4",
+]
 
 [tool.uv]
 package = false
