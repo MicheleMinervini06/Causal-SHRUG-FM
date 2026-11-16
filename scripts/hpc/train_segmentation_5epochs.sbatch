@@ -51,6 +51,7 @@ PY
 # Normal full train/validation splits; --debug would override epochs to one.
 srun uv run --no-sync --extra encoder-cuda python -B scripts/train_segmentation_head.py \
     --device cuda --epochs 5 --seed 0 --batch-size 1 \
+    --log-every 1 \
     --threads "${SLURM_CPUS_PER_TASK}" --patience 5 --output "${run_dir}"
 echo "Five-epoch run completed: ${run_dir}"
 date -u

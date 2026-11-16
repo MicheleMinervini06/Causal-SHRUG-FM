@@ -5,6 +5,7 @@ import csv
 import importlib.util
 import io
 import json
+import math
 from pathlib import Path
 import tempfile
 import unittest
@@ -22,6 +23,7 @@ if HAS_TORCH:
     from scripts import segmentation_common as common
     from scripts import train_segmentation_head as training
     from scripts import predict_segmentation as prediction
+    from scripts import run_segmentation_trial as trials
 
 
 @unittest.skipUnless(HAS_TORCH, "requires uv's encoder extra")
@@ -37,6 +39,16 @@ class NumericalTests(unittest.TestCase):
         self.assertTrue(torch.are_deterministic_algorithms_enabled())
         self.assertFalse(torch.is_deterministic_algorithms_warn_only_enabled())
         self.assertFalse(settings["warn_only"])
+
+    def test_three_trial_profiles_share_the_agreed_protocol(self):
+        self.assertEqual([(profile["batch_size"], profile["learning_rate"]) for profile in trials.TRIALS],
+                         [(1, 5e-5), (8, 5e-5), (1, 2e-5)])
+        for index, profile in enumerate(trials.TRIALS):
+            args = trials.parser().parse_args(["--trial-id", str(index), "--run-group", "check"])
+            train_args = trials.training_arguments(args, profile, Path("unused-output"))
+            self.assertEqual((train_args.epochs, train_args.patience, train_args.seed), (50, 50, 0))
+            self.assertEqual((train_args.weight_decay, train_args.warmup_epochs), (5e-6, 3))
+            self.assertFalse(train_args.debug)
 
     @unittest.skipUnless(HAS_TORCH and torch.cuda.is_available(), "requires an allocated CUDA GPU")
     def test_cuda_bilinear_backward_can_train_with_recorded_warning_policy(self):
@@ -100,6 +112,31 @@ class NumericalTests(unittest.TestCase):
         self.assertTrue(torch.equal(model.pixels.grad[0, :, :, 1], torch.zeros(2, 2)))
         self.assertGreater(model.pixels.grad[0, :, :, 0].abs().sum().item(), 0)
 
+    def test_batch_logging_reports_valid_pixel_loss_without_changing_metrics(self):
+        class ConstantHead(torch.nn.Module):
+            def forward(self, features):
+                # P(water)=3/4 gives known, different water/non-water losses.
+                return features.new_tensor([0., math.log(3)]).reshape(1, 2, 1, 1).expand(len(features), -1, -1, -1)
+
+        targets = ([[1, -1], [-1, -1]], [[0, 0], [0, -1]], [[1, 0], [-1, -1]])
+        samples = [{"features": torch.zeros(384, 14, 14), "target": torch.tensor(target)}
+                   for target in targets]
+        loader = torch.utils.data.DataLoader(samples, collate_fn=common.collate_samples)
+        dense, sparse = io.StringIO(), io.StringIO()
+        with redirect_stdout(dense):
+            first = common.run_epoch(ConstantHead(), loader, "cpu", log_every=1, progress_label="Epoch 2/50")
+        with redirect_stdout(sparse):
+            second = common.run_epoch(ConstantHead(), loader, "cpu", log_every=50)
+        self.assertEqual(first, second)
+        expected = (-2 * math.log(.75) - 4 * math.log(.25)) / 6
+        self.assertAlmostEqual(first["loss"], expected, places=6)
+        self.assertIn("Epoch 2/50 | Validation | batch 1/3 | loss=0.28768", dense.getvalue())
+        self.assertIn("batch 2/3", dense.getvalue())
+        self.assertNotIn("batch 2/3", sparse.getvalue())
+        self.assertIn(f"batch 3/3 | loss=0.83699 | mean_loss={expected:.5f}", dense.getvalue())
+        self.assertIn("F1=0.50000 | IoU=0.33333", dense.getvalue().splitlines()[-1])
+        self.assertIn("ETA=0.0s", dense.getvalue().splitlines()[-1])
+
     def test_fraction_error_uses_matching_support_and_fixed_inclusive_threshold(self):
         sample = {"row": dict(patch_id="Example_1", event_id="Example", original_split="test"),
                   "target": torch.tensor([[1, 0, -1], [1, 0, -1]], dtype=torch.int8)}
@@ -121,7 +158,8 @@ class NumericalTests(unittest.TestCase):
     def test_best_checkpoint_uses_validation_and_early_stops(self):
         model = torch.nn.Conv2d(384, 2, 1)
         config = dict(learning_rate=5e-5, weight_decay=5e-6, warmup_epochs=0,
-                      epochs=4, device="cpu", max_batches=None, patience=1, debug=False, seed=7)
+                      epochs=4, device="cpu", max_batches=None, patience=1, debug=False, seed=7,
+                      log_every=1)
         values = [dict(loss=.1, F1=.99, IoU=.99), dict(loss=.4, F1=.8, IoU=.7),
                   dict(loss=.01, F1=1., IoU=1.), dict(loss=.2, F1=.6, IoU=.5)]
         train_loader, validation_loader = object(), object()
@@ -238,6 +276,55 @@ class DataAndWorkflowTests(unittest.TestCase):
         cache.write_json(self.feature_dir / "cache_config.json", config)
         with self.assertRaisesRegex(ValueError, "cache contract"):
             self.catalog()
+
+    def trial_args(self, trial_id):
+        return trials.parser().parse_args([
+            "--trial-id", str(trial_id), "--run-group", "fixture",
+            "--manifest", str(self.manifest), "--inspection", str(self.audit),
+            "--feature-dir", str(self.feature_dir), "--output-root", str(self.root / "trial-models"),
+            "--metadata-root", str(self.root / "trial-metadata"), "--device", "cpu", "--threads", "1"])
+
+    def test_disposable_preflight_does_not_leak_weights_into_fresh_trial(self):
+        common.configure_runtime(0, "cpu", 1)
+        expected = torch.nn.Conv2d(384, 2, 1).state_dict()
+        created, touched = [], []
+        original_prepare = common.FeatureCatalog.prepare
+
+        def build():
+            model = torch.nn.Conv2d(384, 2, 1)
+            created.append(model)
+            return model
+
+        def prepare(catalog, record):
+            touched.append(record[0]["original_split"])
+            return original_prepare(catalog, record)
+
+        def fit(model, train_loader, val_loader, output, config, provenance):
+            self.assertEqual((config["epochs"], config["patience"]), (50, 50))
+            self.assertTrue(all(torch.equal(value, expected[key]) for key, value in model.state_dict().items()))
+            return {"best_epoch": 1, "epochs_completed": 50, "checkpoint": "best_head.pt"}
+
+        with patch.object(common, "build_decoder", side_effect=build), \
+                patch.object(common.FeatureCatalog, "prepare", prepare), \
+                patch.object(training, "fit", side_effect=fit), redirect_stdout(io.StringIO()):
+            metadata = trials.run_trial(self.trial_args(0))
+        self.assertEqual(len(created), 2)
+        self.assertTrue(any(not torch.equal(value, expected[key]) for key, value in created[0].state_dict().items()))
+        self.assertEqual(touched, ["train", "train", "validation"])
+        self.assertEqual(metadata["status"], "complete")
+        self.assertTrue(metadata["preflight"]["passed"])
+        path = self.root / "trial-metadata/fixture/reference_b1_lr5e-5/trial.json"
+        self.assertEqual(json.loads(path.read_text())["status"], "complete")
+        with self.assertRaisesRegex(ValueError, "already contains results"):
+            trials.run_trial(self.trial_args(0))
+
+    def test_physical_batch_preflight_cannot_silently_shrink_batch_eight(self):
+        with patch.object(training, "run_training") as train, \
+                redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, "Not enough train patches"):
+            trials.run_trial(self.trial_args(1))
+        train.assert_not_called()
+        path = self.root / "trial-metadata/fixture/batch8_lr5e-5/trial.json"
+        self.assertEqual(json.loads(path.read_text())["status"], "failed")
 
     def test_tiny_workflow_is_split_safe_and_exports_native_georeferenced_outputs(self):
         output = self.root / "training"

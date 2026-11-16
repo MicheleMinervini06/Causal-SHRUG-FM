@@ -38,10 +38,14 @@ def fit(model, train_loader, validation_loader, output, config, provenance):
         learning_rate = config["learning_rate"] * factor
         for group in optimizer.param_groups:
             group["lr"] = learning_rate
+        progress_label = f"Epoch {epoch}/{config['epochs']}"
+        print(f"{progress_label} starting | lr={learning_rate:.6g}", flush=True)
         train = common.run_epoch(model, train_loader, config["device"], optimizer,
-                                 max_batches=config["max_batches"])
+                                 max_batches=config["max_batches"], log_every=config["log_every"],
+                                 progress_label=progress_label)
         validation = common.run_epoch(model, validation_loader, config["device"],
-                                      max_batches=config["max_batches"])
+                                      max_batches=config["max_batches"], log_every=config["log_every"],
+                                      progress_label=progress_label)
         if validation["IoU"] is None:
             raise ValueError("Validation water IoU is undefined; choose a validation cohort containing water.")
         duration = time.perf_counter() - started
@@ -83,9 +87,10 @@ def fit(model, train_loader, validation_loader, output, config, provenance):
 
 def run_training(args):
     if (args.epochs < 1 or args.batch_size < 1 or args.patience < 1 or args.warmup_epochs < 0
+            or args.log_every < 1
             or not math.isfinite(args.learning_rate) or args.learning_rate <= 0
             or not math.isfinite(args.weight_decay) or args.weight_decay < 0):
-        raise ValueError("Invalid epochs, batch size, patience, warmup, learning rate or weight decay.")
+        raise ValueError("Invalid epochs, batch size, patience, warmup, logging frequency, learning rate or weight decay.")
     reproducibility = common.configure_runtime(args.seed, args.device, args.threads)
     output = (args.output or common.ROOT / "models/segmentation" /
               f"core_decoder_seed-{args.seed}{'-debug' if args.debug else ''}").resolve()
@@ -109,6 +114,7 @@ def run_training(args):
         "seed": args.seed, "device": args.device, "threads": args.threads,
         "reproducibility": reproducibility,
         "epochs": 1 if args.debug else args.epochs, "batch_size": args.batch_size,
+        "log_every": args.log_every,
         "learning_rate": args.learning_rate, "weight_decay": args.weight_decay,
         "patience": args.patience, "warmup_epochs": args.warmup_epochs,
         "max_batches": 1 if args.debug else None, "debug": args.debug,
@@ -156,6 +162,8 @@ def parser():
     result.add_argument("--weight-decay", type=float, default=5e-6)
     result.add_argument("--warmup-epochs", type=int, default=3)
     result.add_argument("--patience", type=int, default=5)
+    result.add_argument("--log-every", type=int, default=1,
+                        help="Log train/validation progress every N batches (default 1); first/last batches always logged.")
     result.add_argument("--debug", action="store_true", help="One epoch, first two train/validation patches, at most one batch each; original architecture.")
     return result
 

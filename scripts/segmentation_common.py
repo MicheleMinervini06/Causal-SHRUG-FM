@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import random
 import sys
+import time
 
 import numpy as np
 import rasterio
@@ -235,11 +236,18 @@ def water_metrics(counts):
             "IoU": tp / (tp + fp + fn) if tp + fp + fn else None}
 
 
-def run_epoch(model, loader, device, optimizer=None, max_batches=None):
+def run_epoch(model, loader, device, optimizer=None, max_batches=None, *,
+              log_every=1, progress_label=None):
+    if log_every < 1:
+        raise ValueError("Logging frequency must be positive.")
     training = optimizer is not None
     model.train(training)
     totals = dict(tp=0, fp=0, fn=0, n_valid_pixels=0)
     loss_sum, patches, batches = 0.0, 0, 0
+    total_batches = min(len(loader), max_batches) if max_batches is not None else len(loader)
+    phase = "Train" if training else "Validation"
+    prefix = f"{progress_label} | {phase}" if progress_label else phase
+    started = time.perf_counter()
     with torch.set_grad_enabled(training):
         for batch_index, (features, samples) in enumerate(loader):
             if max_batches is not None and batch_index >= max_batches:
@@ -265,13 +273,21 @@ def run_epoch(model, loader, device, optimizer=None, max_batches=None):
                 if any(p.grad is not None and not torch.isfinite(p.grad).all().item() for p in model.parameters()):
                     raise ValueError("Nonfinite decoder gradients.")
                 optimizer.step()
-            loss_sum += float(batch_loss.detach().item())
+            loss_value = float(batch_loss.detach().item())
+            loss_sum += loss_value
             patches += len(samples)
             batches += 1
-            if batches % 50 == 0:
-                phase = "Train" if training else "Validation"
-                print(f"{phase}: {batches} batches, {patches} patches, "
-                      f"valid-pixel CE={loss_sum / totals['n_valid_pixels']:.5f}", flush=True)
+            if batches == 1 or batches % log_every == 0 or batches == total_batches:
+                metrics = water_metrics(totals)
+                f1, iou = ("n/a" if metrics[key] is None else f"{metrics[key]:.5f}"
+                           for key in ("F1", "IoU"))
+                elapsed = time.perf_counter() - started
+                eta = elapsed / batches * max(0, total_batches - batches)
+                print(f"{prefix} | batch {batches}/{total_batches} | "
+                      f"loss={loss_value / batch_valid:.5f} | "
+                      f"mean_loss={loss_sum / totals['n_valid_pixels']:.5f} | "
+                      f"F1={f1} | IoU={iou} | elapsed={elapsed:.1f}s | ETA={eta:.1f}s",
+                      flush=True)
     if not batches or not totals["n_valid_pixels"]:
         raise ValueError("Epoch contains no valid batches.")
     return {"loss": loss_sum / totals["n_valid_pixels"], **water_metrics(totals),

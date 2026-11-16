@@ -52,6 +52,7 @@ PY
 srun uv run --no-sync --extra encoder-cuda python -B scripts/train_segmentation_head.py \
     --device cuda --epochs 50 --seed 0 --batch-size 1 \
     --learning-rate 5e-5 --weight-decay 5e-6 --warmup-epochs 3 --patience 5 \
+    --log-every 1 \
     --threads "${SLURM_CPUS_PER_TASK}" --output "${run_dir}"
 echo "Full training finished (50-epoch cap; validation early stopping): ${run_dir}"
 date -u

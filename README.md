@@ -609,8 +609,8 @@ preflight, then starts training. It never installs packages inside the job.
 Logs are `logs/segmentation-5ep-JOBID.out` and `.err`; results are
 `models/segmentation/core_decoder_seed-0-5epochs-job-JOBID/`. Each submission gets
 a fresh output directory. `history.csv` includes epoch duration and CUDA peak
-allocated/reserved memory, as well as losses/F1/IoU; progress is logged every 50
-batches. Read the logs and history while it runs:
+allocated/reserved memory, as well as losses/F1/IoU; progress is logged every
+batch by default. Read the logs and history while it runs:
 
 ```sh
 tail -f logs/segmentation-5ep-JOBID.out
@@ -663,6 +663,25 @@ Follow the actual job ID printed by `sbatch`:
 ```sh
 tail -F logs/segmentation-full-JOBID.out logs/segmentation-full-JOBID.err
 ```
+
+The trainer writes a flushed line for every train/validation batch by default:
+
+```text
+Epoch 1/50 starting | lr=5e-06
+Epoch 1/50 | Train | batch 12/250 | loss=0.41234 | mean_loss=0.43827 | F1=0.72000 | IoU=0.56250 | elapsed=3.8s | ETA=75.4s
+```
+
+Values above illustrate the format, not measured performance. `loss` is the
+current batch's valid-pixel mean cross-entropy; `mean_loss` and water F1/IoU
+accumulate over the current phase. ETA applies to that train/validation phase.
+`n/a` denotes undefined empty-water scores. `--log-every N` reduces output to
+every N batches (first/last always logged); the frequency is saved in the run
+configuration. Both Slurm entrypoints explicitly use `--log-every 1`. No new
+package or environment rebuild is needed for this logging change.
+
+An already running Python process keeps its loaded training code. Runs started
+before this logging update still print every 50 batches and at epoch completion.
+Keep the checkout fixed while they run; deploy logging updates between runs.
 
 When training finishes successfully, use this run's `best_head.pt` for the planned
 held-out test/Bolivia evaluation. Do not select epochs or tune the fixed 0.5
@@ -722,3 +741,74 @@ password prompt. Anunna/WUR login authentication is separate.
 
 References: [Git mixed reset](https://git-scm.com/docs/git-reset)
 and [GitHub authentication](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/about-authentication-to-github).
+
+## Three controlled training configurations
+
+`scripts/hpc/train_segmentation_trials.sbatch` submits three independent array
+tasks, with **at most one GPU task running at a time** (`--array=0-2%1`):
+
+| Array task | Profile | Physical batch size | Learning rate |
+| --- | --- | ---: | ---: |
+| 0 | `reference_b1_lr5e-5` | 1 | `5e-5` |
+| 1 | `batch8_lr5e-5` | 8 | `5e-5` |
+| 2 | `lower_lr_b1_lr2e-5` | 1 | `2e-5` |
+
+Every trial initializes a new original CoreDecoder with **seed 0**, trains for
+**50 epochs**, and uses **patience 50** so early stopping cannot truncate this
+50-epoch diagnostic comparison. The best validation-IoU checkpoint is still saved
+(ties: lower validation CE). Encoder/cache/preprocessing, architecture, masked
+cross-entropy, weight decay `5e-6`, three-epoch warmup and fixed 0.5 threshold stay
+the same. Test/Bolivia are not used. The older 21-epoch baseline is preserved.
+
+The shared runner is `scripts/run_segmentation_trial.py`. Before the full fit it
+verifies a real **training-only** batch at the requested physical batch size,
+using the original decoder, native masks, backward pass and an AdamW step. This
+also checks optimizer-state memory allocations, including for batch 8. That model
+and optimizer are discarded, GPU cache is released, and the trainer resets seed 0
+before fresh initialization. No preflight weight or normalization update carries
+into training. A failed memory check fails that trial; it does not silently
+reduce its batch size. No new dependencies are required.
+
+After committing/pushing local changes and pulling them into the existing Anunna
+project (including the latest per-batch logging), submit from its root:
+
+```sh
+mkdir -p logs
+sbatch scripts/hpc/train_segmentation_trials.sbatch
+squeue -u "$USER"
+```
+
+Each task requests one A100, four CPU cores, 16 GiB system RAM and a two-hour time
+limit. Array scheduling does not guarantee execution order. Keep the Anunna code
+checkout unchanged until **all three tasks** finish; the Linux CUDA environment
+and data are reused without package installation inside the jobs.
+
+For the array job ID `ARRAYID`, logs and outputs are:
+
+```text
+logs/segmentation-trials-ARRAYID_0.out   # reference; .err alongside
+logs/segmentation-trials-ARRAYID_1.out   # batch 8
+logs/segmentation-trials-ARRAYID_2.out   # lower LR
+models/segmentation/config_comparison/array-ARRAYID/<profile>/
+results/segmentation_config_comparison/array-ARRAYID/<profile>/trial.json
+```
+
+Model folders contain `config.json`, `history.csv`, `training_summary.json` and
+`best_head.pt`. `trial.json` records the profile, code commit/dirty state/source
+hashes, data provenance, real-batch memory/gradient check, actual training
+arguments, status and final summary. Follow all three logs, waiting for tasks
+that have not started yet:
+
+```sh
+tail -n 20 -F logs/segmentation-trials-ARRAYID_0.out logs/segmentation-trials-ARRAYID_0.err \
+             logs/segmentation-trials-ARRAYID_1.out logs/segmentation-trials-ARRAYID_1.err \
+             logs/segmentation-trials-ARRAYID_2.out logs/segmentation-trials-ARRAYID_2.err
+```
+
+Batch 1 gives 250 optimizer updates per epoch; batch 8 gives 32 (31 full batches
+plus a final batch of 2), retaining all 250 training patches. Use the recorded
+`train_batches` in `history.csv` to compare cumulative update counts as well as
+epochs. Thus the batch-size trial tests the practical batching change, not solely
+BatchNorm statistics. Inspect validation quality and collapses alongside
+smoothness, then repeat promising configurations with additional seeds before
+final held-out evaluation. The cache is not recomputed by these trials.
