@@ -988,3 +988,130 @@ tail -n 30 -F logs/segmentation-uncertainty-JOBID.out logs/segmentation-uncertai
 
 For an explicitly chosen later evaluation, pass split names after the training
 array ID, e.g. `test bolivia_holdout`. Do not tune settings on those holdouts.
+
+## Spatial input uncertainty: pretraining geographic density
+
+`scripts/compute_spatial_density.py` implements the spatial component of
+[SHRUG-FM's input signal](https://arxiv.org/html/2511.10370v2): fit a KDE using
+SSL4EO-S12 pretraining locations, then evaluate it at each downstream patch
+center. Lower density means sparser nearby geographic coverage during
+pretraining. It is a feature for later reliability analysis, not a calibrated
+probability of prediction error. Environmental percentile features are deferred.
+
+The script uses the official location CSV linked by the
+[SSL4EO-S12 repository](https://github.com/zhu-xlab/SSL4EO-S12):
+**251,079 distinct location IDs and coordinate pairs**, headerless
+`id,longitude,latitude`, with blank lines. Each location has equal weight;
+seasonal images are not repeated. The source is pinned by SHA-256:
+
+```text
+e9e5e5d3d7ba977efbc19785cb5362aee412d9c66a3864ef0fae524c5d1a94f5
+```
+
+This is the released dataset's location catalog; the exact per-checkpoint
+sampling trace is unavailable. Metadata records the intended encoder hash.
+
+The downloaded file is about 8 MB, stored in
+`data/ssl4eo-s12/pretraining_coordinates.csv`. Existing files are verified;
+changed/corrupt inputs are rejected. The file is excluded from Git, so download
+or copy it separately on Anunna. No new dependencies are needed: the calculation
+uses NumPy and Rasterio, without PyTorch, scikit-learn or model inference.
+
+The metric is an equal-weight KDE:
+
+\[
+\widehat\rho(s)=\frac{1}{N Z_h}\sum_{i=1}^{N}
+\exp\left(-\frac{d(s,s_i)^2}{2h^2}\right),
+\]
+
+where `d` is great-circle distance on a sphere of radius **6371 km**, `h` is the
+Gaussian bandwidth in km, and `Z_h` normalizes each kernel over the spherical
+surface. The initial bandwidth is **100 km**, a declared physical scale chosen
+without using downstream outcomes, labels or prediction errors. It is exposed
+as `--bandwidth-km`; the authors' original kernel, bandwidth and metric settings
+are unverified, so this reproduces their KDE feature definition rather than
+claiming numerically identical scores. A future sensitivity comparison can use
+predeclared 50/100/200 km scales without selecting a bandwidth on test errors.
+
+Normalization uses the integral
+`Z_h = 2*pi*R^2 * integral_0^pi exp(-theta^2/(2*(h/R)^2))*sin(theta) dtheta`.
+After scaling `u=theta/(h/R)`, 64-point Gauss-Legendre quadrature integrates to
+`min(pi*R/h,12)`; the omitted Gaussian tail is below `exp(-72)`. Every reference
+location contributes to the KDE; the fitted kernel itself is not truncated.
+This avoids both Euclidean distances on raw longitude/latitude and planar-only
+density normalization. Computation is float64 and processes one query at a time
+to bound memory. Tests independently check surface normalization, known kernel
+values, the dateline and polar geometry.
+
+Patch centers use `image.transform @ (width/2,height/2)` in the source CRS,
+reprojected to WGS84 (`EPSG:4326`). Our encoder resizes the **whole source image**,
+so that image's footprint is the model footprint. The legacy WorldFloods
+coordinate exporter is not imported: its dataset setup is unrelated and its
+`x1 + x2/2` expression is not a midpoint. New centers are verified against the
+audit's image dimensions, CRS and affine transform. The audit's complete usable
+cohort and manifest identity are reused through `cache_encoder_features` helpers;
+pixel values, reference water classes and cached encoder arrays are not read.
+
+By default the script computes features for all usable patches, preserving
+`patch_id`, `event_id` and `original_split` (currently 439 patches; 7 excluded by
+the audit). Computing locations for test/holdout patches does not fit or evaluate
+anything on their labels. Use `--splits validation` for validation-only output,
+and `--limit 2` for a small implementation check. Outputs require a new/empty
+directory:
+
+```text
+spatial_density.csv
+density_config.json
+density_summary.json
+```
+
+The CSV contains:
+
+```text
+patch_id,event_id,original_split,longitude,latitude,pretraining_density,pretraining_log_density
+```
+
+`pretraining_density` is normalized density in **km^-2**, not a local image count
+or a probability. Its natural logarithm is retained as a numerical diagnostic
+when a very small bandwidth makes raw density underflow to zero. Configuration
+records source hash/URL, weighting, kernel, bandwidth, units, Earth radius,
+normalization, patch-center convention, input audit hashes, versions and code
+hashes. The summary records completeness/limits, split counts, excluded patches,
+raw-density underflows and within-event density ranges/standard deviations.
+No automatic feature selection, uncertainty threshold, or classifier is fitted.
+
+For a local implementation check in the existing CPU encoder environment:
+
+```sh
+uv run --locked --extra encoder python -B scripts/compute_spatial_density.py --download-only
+uv run --locked --extra encoder python -B scripts/compute_spatial_density.py \
+  --splits validation --limit 2 --output results/input_uncertainty/local-density-check
+```
+
+On **Anunna**, after committing/pushing locally and pulling the code into the
+project, prepare the small input CSV once and submit the CPU job:
+
+```sh
+git pull --ff-only
+module load 2025 uv
+uv run --no-sync python -B scripts/compute_spatial_density.py --download-only
+mkdir -p logs
+sbatch scripts/hpc/compute_spatial_density.sbatch
+```
+
+The Slurm job uses the existing project environment without synchronizing or
+removing the installed CUDA extra. It requests **one CPU, 2 GiB RAM, 15 minutes**
+in the `main` partition; no GPU is requested. It performs no network download or
+package installation inside the batch job. Override the bandwidth, for example,
+with `sbatch scripts/hpc/compute_spatial_density.sbatch 50`, using a separate
+output directory automatically. Results and logs are:
+
+```text
+results/input_uncertainty/spatial_density/h-100km-job-JOBID/
+logs/spatial-density-JOBID.out
+logs/spatial-density-JOBID.err
+```
+
+Keep these raw features and their settings fixed when comparing them with U_T.
+Inspect both within-event variation and between-event differences before
+interpreting geographic density as a predictor of segmentation or fraction error.
