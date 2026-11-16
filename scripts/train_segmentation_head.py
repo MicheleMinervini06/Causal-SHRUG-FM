@@ -8,6 +8,7 @@ import argparse
 from datetime import datetime, timezone
 import math
 from pathlib import Path
+import time
 
 import torch
 
@@ -30,6 +31,9 @@ def fit(model, train_loader, validation_loader, output, config, provenance):
     warmup = config["warmup_epochs"]
     history, best_key, best_epoch, stale = [], None, None, 0
     for epoch in range(1, config["epochs"] + 1):
+        started = time.perf_counter()
+        if config["device"] == "cuda":
+            torch.cuda.reset_peak_memory_stats()
         factor = 0.1 + 0.9 * min((epoch - 1) / warmup, 1.0) if warmup else 1.0
         learning_rate = config["learning_rate"] * factor
         for group in optimizer.param_groups:
@@ -40,7 +44,10 @@ def fit(model, train_loader, validation_loader, output, config, provenance):
                                       max_batches=config["max_batches"])
         if validation["IoU"] is None:
             raise ValueError("Validation water IoU is undefined; choose a validation cohort containing water.")
-        row = {"epoch": epoch, "learning_rate": learning_rate}
+        duration = time.perf_counter() - started
+        row = {"epoch": epoch, "learning_rate": learning_rate, "duration_seconds": duration,
+               "cuda_peak_allocated_MiB": torch.cuda.max_memory_allocated() / 2**20 if config["device"] == "cuda" else None,
+               "cuda_peak_reserved_MiB": torch.cuda.max_memory_reserved() / 2**20 if config["device"] == "cuda" else None}
         row.update({f"train_{key}": value for key, value in train.items()})
         row.update({f"validation_{key}": value for key, value in validation.items()})
         history.append(row)
@@ -64,7 +71,7 @@ def fit(model, train_loader, validation_loader, output, config, provenance):
             stale += 1
         print(f"Epoch {epoch}/{config['epochs']}: train CE={train['loss']:.5f}, "
               f"validation CE={validation['loss']:.5f}, water IoU={validation['IoU']:.5f}, "
-              f"F1={validation['F1']:.5f}; best epoch={best_epoch}", flush=True)
+              f"F1={validation['F1']:.5f}; best epoch={best_epoch}; {duration:.1f}s", flush=True)
         if stale >= config["patience"]:
             break
     summary = {"best_epoch": best_epoch, "best_validation_IoU": best_key[0],
@@ -79,7 +86,7 @@ def run_training(args):
             or not math.isfinite(args.learning_rate) or args.learning_rate <= 0
             or not math.isfinite(args.weight_decay) or args.weight_decay < 0):
         raise ValueError("Invalid epochs, batch size, patience, warmup, learning rate or weight decay.")
-    common.configure_runtime(args.seed, args.device, args.threads)
+    reproducibility = common.configure_runtime(args.seed, args.device, args.threads)
     output = (args.output or common.ROOT / "models/segmentation" /
               f"core_decoder_seed-{args.seed}{'-debug' if args.debug else ''}").resolve()
     if output.exists() and any(output.iterdir()):
@@ -100,6 +107,7 @@ def run_training(args):
     model = common.build_decoder().to(args.device)
     config = {
         "seed": args.seed, "device": args.device, "threads": args.threads,
+        "reproducibility": reproducibility,
         "epochs": 1 if args.debug else args.epochs, "batch_size": args.batch_size,
         "learning_rate": args.learning_rate, "weight_decay": args.weight_decay,
         "patience": args.patience, "warmup_epochs": args.warmup_epochs,

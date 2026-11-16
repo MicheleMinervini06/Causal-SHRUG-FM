@@ -67,10 +67,19 @@ def configure_runtime(seed, device, threads):
         torch.cuda.manual_seed_all(seed)
     torch.set_num_threads(threads)
     torch.set_float32_matmul_precision("highest")
-    torch.use_deterministic_algorithms(True)
+    # CUDA bilinear upsampling has no deterministic backward in PyTorch 2.11.
+    # Preserve CoreDecoder's original interpolation and report warnings rather
+    # than aborting training. CPU remains strict; GPU runs are seeded but may vary.
+    torch.use_deterministic_algorithms(True, warn_only=(device == "cuda"))
+    torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
+    return {"deterministic_algorithms": True, "warn_only": device == "cuda",
+            "cudnn_deterministic": True, "cudnn_benchmark": False, "tf32": False,
+            "cuda_runtime": torch.version.cuda,
+            "device_name": torch.cuda.get_device_name(0) if device == "cuda" else "cpu",
+            "note": "CUDA bilinear backward may be nondeterministic; seed does not guarantee identical GPU runs."}
 
 
 def runtime_versions():
@@ -259,6 +268,10 @@ def run_epoch(model, loader, device, optimizer=None, max_batches=None):
             loss_sum += float(batch_loss.detach().item())
             patches += len(samples)
             batches += 1
+            if batches % 50 == 0:
+                phase = "Train" if training else "Validation"
+                print(f"{phase}: {batches} batches, {patches} patches, "
+                      f"valid-pixel CE={loss_sum / totals['n_valid_pixels']:.5f}", flush=True)
     if not batches or not totals["n_valid_pixels"]:
         raise ValueError("Epoch contains no valid batches.")
     return {"loss": loss_sum / totals["n_valid_pixels"], **water_metrics(totals),

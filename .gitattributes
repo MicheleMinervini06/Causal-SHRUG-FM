@@ -1,0 +1,3 @@
+# Slurm rejects CRLF submission scripts; keep Linux shell entrypoints portable.
+*.sbatch text eol=lf
+*.sh text eol=lf

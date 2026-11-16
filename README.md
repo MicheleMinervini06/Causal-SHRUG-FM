@@ -577,3 +577,148 @@ References: [uv's mutually exclusive PyTorch extras](https://docs.astral.sh/uv/g
 [Anunna uv setup](https://wiki.anunna.wur.nl/Uv),
 [Anunna GPU allocations](https://wiki.anunna.wur.nl/Compute_Nodes),
 and [batch jobs](https://wiki.anunna.wur.nl/Batch_Jobs).
+
+## Five-epoch Anunna training check
+
+`scripts/hpc/train_segmentation_5epochs.sbatch` requests one NVIDIA A100, four CPU
+cores, 16 GiB of system RAM and a two-hour time limit. It runs the normal full
+train/validation cohort for **five epochs**, seed 0, batch size 1, with the existing
+AdamW/loss/warmup settings. It does **not** pass `--debug`, which would reduce the
+run to one batch/epoch. Test and Bolivia remain unused. This is a pipeline and
+early-learning check, not a convergence or final model-quality assessment.
+
+Transfer the current code, `pyproject.toml`, `uv.lock`, `.python-version`,
+`data/sen1floods11/` and `results/segmentation_data/` to a fresh project directory
+on your assigned Lustre storage. The feature index and audit must be copied as
+well as the patch NPZs; retain source TIFFs and any GDAL sidecars. Encoder weights
+are not needed to train from the cached features. A Git clone alone does not
+include these ignored data/report artifacts or uncommitted code changes.
+
+After preparing `.venv` once in an interactive compute session with
+`module load 2025 uv` and `uv sync --locked --extra encoder-cuda`, return to the
+login node and submit **from the transferred project root**:
+
+```sh
+mkdir -p logs
+sbatch scripts/hpc/train_segmentation_5epochs.sbatch
+squeue -u "$USER"
+```
+
+The submission script performs a small CUDA interpolation forward/backward
+preflight, then starts training. It never installs packages inside the job.
+Logs are `logs/segmentation-5ep-JOBID.out` and `.err`; results are
+`models/segmentation/core_decoder_seed-0-5epochs-job-JOBID/`. Each submission gets
+a fresh output directory. `history.csv` includes epoch duration and CUDA peak
+allocated/reserved memory, as well as losses/F1/IoU; progress is logged every 50
+batches. Read the logs and history while it runs:
+
+```sh
+tail -f logs/segmentation-5ep-JOBID.out
+sacct -j JOBID --format=JobID,State,Elapsed,MaxRSS,ExitCode
+```
+
+The original decoder's CUDA bilinear backward has no deterministic implementation
+in the locked PyTorch 2.11 runtime. CUDA therefore requests deterministic
+algorithms with `warn_only=True`; unsupported operations emit a warning rather
+than aborting the run. CPU remains strict. Seeds, disabled TF32, deterministic
+cuDNN selection and the actual policy/device are recorded, but GPU training is
+not guaranteed bitwise repeatable. This preserves the original decoder and its
+bilinear interpolation. See [PyTorch's determinism documentation](https://docs.pytorch.org/docs/2.11/generated/torch.use_deterministic_algorithms.html).
+
+## Full Anunna training
+
+After the five-epoch check, `scripts/hpc/train_segmentation_full.sbatch` runs up to
+50 epochs with the same seed 0, batch size 1, AdamW learning rate `5e-5`, weight
+decay `5e-6`, three-epoch warmup and patience 5. It uses all usable train and
+validation patches and selects by validation water IoU (ties: lower CE), leaving
+test and Bolivia out of fitting/selection. Review the five-epoch losses and
+validation scores for finite, plausible learning before the longer run.
+
+This is a **fresh training run**, not a continuation from the five-epoch head.
+The current checkpoint saves model weights, not the optimizer/scheduler state
+required for exact resumption. The encoder remains frozen and uses the existing
+cached features. The architecture, loss and valid support are unchanged.
+
+The new submission script is standalone; upload it into the existing Anunna
+project's `scripts/hpc/` directory. No dataset transfer or environment rebuild is
+needed if the successful check's data/code/environment remain unchanged. From
+that project's root on the login node:
+
+```sh
+mkdir -p logs
+sbatch scripts/hpc/train_segmentation_full.sbatch
+```
+
+It requests the same one A100, four CPU cores and 16 GiB RAM, with a **four-hour
+wall-time cap**. This is a limit, not an estimated duration. Use measured epoch
+durations from the five-epoch `history.csv` to size it, allowing for input
+verification/checkpoint writes and later variability; override at submission
+with `sbatch --time=HH:MM:SS scripts/hpc/train_segmentation_full.sbatch` if needed.
+There is currently no automatic restart after a timeout.
+
+Outputs are `models/segmentation/core_decoder_seed-0-full-job-JOBID/`; logs are
+`logs/segmentation-full-JOBID.out` and `.err`. Earlier check runs are preserved.
+Follow the actual job ID printed by `sbatch`:
+
+```sh
+tail -F logs/segmentation-full-JOBID.out logs/segmentation-full-JOBID.err
+```
+
+When training finishes successfully, use this run's `best_head.pt` for the planned
+held-out test/Bolivia evaluation. Do not select epochs or tune the fixed 0.5
+prediction threshold using those held-out results.
+
+## Synchronize local development and Anunna with Git
+
+Develop/review/test locally, commit and push an intended code version to
+`https://github.com/MicheleMinervini06/Causal-SHRUG-FM.git`, then pull it on Anunna
+between runs. Keep the upstream project as the separate `upstream` remote.
+Only source/configuration/job scripts travel through Git; data, features, audit
+reports, `.venv`, logs and outputs stay on Lustre and remain ignored by Git.
+
+The initial Anunna folder was uploaded as an archive. To attach it to Git while
+preserving all existing working files, first commit/push the current local code,
+then run this **one-time** setup on the Anunna login node or Remote SSH terminal:
+
+```sh
+cd /lustre/nobackup/WUR/AIN/miner003/SHRUG-FM
+if [ -e .git ]; then
+    echo "Git is already configured here; inspect git status and git remote -v instead."
+else
+    (
+        set -e
+        git init -b main
+        git remote add origin https://github.com/MicheleMinervini06/Causal-SHRUG-FM.git
+        git remote add upstream https://github.com/vishalned/SHRUG-FM.git
+        git fetch origin
+        git reset --mixed origin/main
+        git branch --set-upstream-to=origin/main main
+        git config pull.ff only
+        git status --short --branch
+    )
+fi
+```
+
+`reset --mixed` sets the initial branch/index to GitHub's history while retaining
+the current working files. This intentionally exposes any uploaded/HPC code
+differences rather than overwriting them. Review/reconcile the reported code
+differences once before pulling or submitting a new experiment. If setup stops
+after `git init`, inspect the existing configuration before resuming; do not
+repeat the reset against an established repository with local commits.
+
+After the initial code alignment, routine HPC updates are:
+
+```sh
+git status --short --branch
+git pull --ff-only
+git rev-parse HEAD
+```
+
+Update between active runs, and retain the commit ID with the experiment.
+Prepare the environment in a compute allocation if `pyproject.toml` or `uv.lock`
+changed. A public HTTPS repository can be fetched without a GitHub login; private
+access needs GitHub authentication, such as a personal access token at the HTTPS
+password prompt. Anunna/WUR login authentication is separate.
+
+References: [Git mixed reset](https://git-scm.com/docs/git-reset)
+and [GitHub authentication](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/about-authentication-to-github).

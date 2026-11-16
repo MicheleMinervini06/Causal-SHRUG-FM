@@ -68,7 +68,7 @@ def run_prediction(args):
     # Load/check on CPU before configuring the requested device. Seed comes from the head.
     model, checkpoint = common.load_head(args.checkpoint, catalog)
     seed = checkpoint["model_seed"]
-    common.configure_runtime(seed, args.device, args.threads)
+    reproducibility = common.configure_runtime(seed, args.device, args.threads)
     model.to(args.device)
     if checkpoint["config"]["debug"] and not args.allow_debug_head:
         raise ValueError("Debug checkpoint: pass --allow-debug-head only for implementation checks.")
@@ -81,6 +81,7 @@ def run_prediction(args):
         raise ValueError(f"Output is not empty; select a new --output directory: {output}")
     checkpoint_hash = common.cache.digest(args.checkpoint)
     provenance = {"head_sha256": checkpoint_hash, "model_seed": seed, "head_epoch": checkpoint["epoch"],
+                  "reproducibility": reproducibility,
                   "architecture": checkpoint["architecture"], "decoder_sources": checkpoint["decoder_sources"],
                   "data_provenance": catalog.provenance, "threshold": args.threshold,
                   "checkpoint_validation_threshold": checkpoint["threshold"],

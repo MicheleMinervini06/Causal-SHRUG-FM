@@ -29,6 +29,29 @@ class NumericalTests(unittest.TestCase):
     def setUp(self):
         common.configure_runtime(17, "cpu", 2)
 
+    def test_cpu_seed_repeats_random_inputs_and_remains_strict(self):
+        settings = common.configure_runtime(17, "cpu", 2)
+        first = torch.randn(3, 4)
+        common.configure_runtime(17, "cpu", 2)
+        self.assertTrue(torch.equal(first, torch.randn(3, 4)))
+        self.assertTrue(torch.are_deterministic_algorithms_enabled())
+        self.assertFalse(torch.is_deterministic_algorithms_warn_only_enabled())
+        self.assertFalse(settings["warn_only"])
+
+    @unittest.skipUnless(HAS_TORCH and torch.cuda.is_available(), "requires an allocated CUDA GPU")
+    def test_cuda_bilinear_backward_can_train_with_recorded_warning_policy(self):
+        try:
+            settings = common.configure_runtime(17, "cuda", 2)
+            values = torch.randn(1, 2, 3, 3, device="cuda", requires_grad=True)
+            target = torch.zeros(1, 7, 9, dtype=torch.long, device="cuda")
+            logits = common.native_logits(values, target.shape[-2:])
+            torch.nn.functional.cross_entropy(logits, target).backward()
+            self.assertTrue(torch.isfinite(values.grad).all().item())
+            self.assertGreater(values.grad.abs().sum().item(), 0)
+            self.assertTrue(settings["warn_only"])
+        finally:
+            common.configure_runtime(17, "cpu", 2)
+
     def test_original_decoder_shape_and_no_architecture_simplification(self):
         model = common.build_decoder().eval()
         self.assertEqual(model.__class__.__module__, "signal_task.models.model_components.decoder")
