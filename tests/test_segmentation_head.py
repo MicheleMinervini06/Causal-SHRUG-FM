@@ -50,6 +50,40 @@ class NumericalTests(unittest.TestCase):
             self.assertEqual((train_args.weight_decay, train_args.warmup_epochs), (5e-6, 3))
             self.assertFalse(train_args.debug)
 
+    def test_ensemble_members_change_only_seed_and_output_from_batch8_protocol(self):
+        baseline_args = trials.parser().parse_args(["--trial-id", "1", "--run-group", "check"])
+        baseline = vars(trials.training_arguments(baseline_args, trials.TRIALS[1], Path("seed0")))
+        for seed in (1, 2):
+            args = trials.parser().parse_args(["--trial-id", "1", "--run-group", "check",
+                                              "--seed", str(seed)])
+            member = vars(trials.training_arguments(args, trials.TRIALS[1], Path(f"seed{seed}")))
+            differences = {key for key in baseline if baseline[key] != member[key]}
+            self.assertEqual(differences, {"seed", "output"})
+            self.assertEqual(member["seed"], seed)
+
+    def test_trial_preserves_seed_through_preflight_training_and_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for seed in (1, 2):
+                args = trials.parser().parse_args([
+                    "--trial-id", "1", "--run-group", "check", "--seed", str(seed),
+                    "--output-root", str(Path(directory) / "models"),
+                    "--metadata-root", str(Path(directory) / "metadata"), "--device", "cpu"])
+                with patch.object(trials, "code_identity", return_value={}), \
+                     patch.object(common, "FeatureCatalog") as catalog, \
+                     patch.object(trials, "check_training_batch", return_value={"passed": True}) as preflight, \
+                     patch.object(training, "run_training", return_value={"best_epoch": 1}) as run, \
+                     redirect_stdout(io.StringIO()):
+                    catalog.return_value.provenance = {"fixture": True}
+                    metadata = trials.run_trial(args)
+                    self.assertEqual(preflight.call_args.kwargs["seed"], seed)
+                    self.assertEqual(run.call_args.args[0].seed, seed)
+                    self.assertEqual(run.call_args.args[0].output.name, f"batch8_lr5e-5_seed-{seed}")
+                    self.assertEqual(metadata["seed"], seed)
+                    self.assertEqual(metadata["status"], "complete")
+                # Reusing a member's destination must fail before any training.
+                with self.assertRaisesRegex(ValueError, "already contains results"):
+                    trials.run_trial(args)
+
     @unittest.skipUnless(HAS_TORCH and torch.cuda.is_available(), "requires an allocated CUDA GPU")
     def test_cuda_bilinear_backward_can_train_with_recorded_warning_policy(self):
         try:

@@ -812,3 +812,80 @@ epochs. Thus the batch-size trial tests the practical batching change, not solel
 BatchNorm statistics. Inspect validation quality and collapses alongside
 smoothness, then repeat promising configurations with additional seeds before
 final held-out evaluation. The cache is not recomputed by these trials.
+
+## Additional ensemble members: seeds 1 and 2
+
+Reuse the **seed-0, batch-8, LR `5e-5`** checkpoint from the completed comparison:
+
+```text
+models/segmentation/config_comparison/array-44148765/batch8_lr5e-5/best_head.pt
+```
+
+Its best validation checkpoint is epoch 46 (water IoU `0.6216474791`). Keep this
+checkpoint and its `config.json`; seed 0 is not retrained or overwritten.
+`scripts/hpc/train_segmentation_ensemble.sbatch` trains **only seeds 1 and 2**
+using the same batch-8 profile through `run_segmentation_trial.py --trial-id 1`.
+This is a standard ensemble: all members use the same training patches, with
+different random initialization and training shuffle; there is no bootstrap.
+The original SHRUG-FM flood standard-ensemble configuration is in
+`src/config/models.toml` (ten members there; three for this preliminary study).
+
+Both new members use AdamW, LR `5e-5`, weight decay `5e-6`, three-epoch warmup,
+unweighted masked cross-entropy, 50 epochs and patience 50. Each saves its own
+best validation-IoU checkpoint (ties: lower CE); best epochs can differ between
+seeds. The trainer, original CoreDecoder, frozen feature cache, native reference
+support, and splits stay the same. Test and Bolivia remain unused. Each member
+gets the existing disposable real-batch forward/backward/AdamW preflight, then
+fresh initialization with its requested seed.
+
+Before that preflight, `--reference-config` compares the existing seed-0
+configuration with the requested training settings, architecture/decoder source
+hashes, trainer/common source hashes, runtime package versions, data/cache
+provenance, and selected train/validation patch IDs. A mismatch stops the job
+instead of silently changing the experiment. The seed must differ from the
+reference. The shared runner still defaults to seed 0 and retains the previous
+comparison output paths when used without the new options.
+
+After committing/pushing the local changes, run in the **Anunna project terminal**:
+
+```sh
+git pull --ff-only
+mkdir -p logs
+sbatch scripts/hpc/train_segmentation_ensemble.sbatch
+squeue -r -u "$USER"
+```
+
+No dependency changes or new `uv sync` are needed if the working CUDA environment
+is unchanged. Each task requests one A100, four CPU cores, 16 GiB system RAM,
+and two hours. The default `--array=1-2%1` runs one member at a time. To allow
+two independent one-GPU tasks concurrently, submit **instead** with:
+
+```sh
+sbatch --array=1-2%2 scripts/hpc/train_segmentation_ensemble.sbatch
+```
+
+For the new array job ID `ARRAYID`, the task ID is also the model seed:
+
+```text
+logs/segmentation-ensemble-ARRAYID_1.out     # seed 1; .err alongside
+logs/segmentation-ensemble-ARRAYID_2.out     # seed 2; .err alongside
+models/segmentation/ensemble/array-ARRAYID/batch8_lr5e-5_seed-1/
+models/segmentation/ensemble/array-ARRAYID/batch8_lr5e-5_seed-2/
+results/segmentation_ensemble/array-ARRAYID/batch8_lr5e-5_seed-1/trial.json
+results/segmentation_ensemble/array-ARRAYID/batch8_lr5e-5_seed-2/trial.json
+```
+
+The model folders contain `best_head.pt`, `config.json`, `history.csv` and
+`training_summary.json`. Metadata includes the reference-config hash and checked
+fields, seed, code version, preflight and completion status. Follow both members:
+
+```sh
+tail -n 20 -F logs/segmentation-ensemble-ARRAYID_1.out logs/segmentation-ensemble-ARRAYID_1.err \
+             logs/segmentation-ensemble-ARRAYID_2.out logs/segmentation-ensemble-ARRAYID_2.err
+```
+
+Keep the Anunna code and environment fixed until both tasks finish. Uncertainty
+code can be developed locally meanwhile; pull it on Anunna after training, or
+use a separate checkout. These jobs do not generate predictions or uncertainty
+scores. Later, combine the two new best checkpoints with the existing seed-0
+checkpoint, retaining every seed rather than selecting only the best member.

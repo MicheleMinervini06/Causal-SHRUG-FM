@@ -1,13 +1,15 @@
 """Run one controlled decoder trial after a disposable real-batch training check.
 
 The Slurm array maps task IDs 0/1/2 to reference, larger batch and lower LR.
-All trials use fresh initialization, seed 0, 50 epochs and patience 50.
+All trials use fresh initialization, 50 epochs and patience 50. Seed defaults
+to 0; additional ensemble members can set --seed and --reference-config.
 """
 
 import argparse
 from datetime import datetime, timezone
 import gc
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -43,7 +45,8 @@ def code_identity():
     except (OSError, subprocess.CalledProcessError):
         commit, status, diff_hash = None, None, None
     paths = (Path(__file__), Path(common.__file__), Path(training.__file__),
-             common.ROOT / "scripts/hpc/train_segmentation_trials.sbatch")
+             common.ROOT / "scripts/hpc/train_segmentation_trials.sbatch",
+             common.ROOT / "scripts/hpc/train_segmentation_ensemble.sbatch")
     return {"git_commit": commit, "git_dirty": bool(status) if status is not None else None,
             "git_status": status, "git_diff_sha256": diff_hash,
             "source_sha256_lf": {path.relative_to(common.ROOT).as_posix():
@@ -52,13 +55,13 @@ def code_identity():
             "decoder_sources": common.decoder_sources()}
 
 
-def check_training_batch(catalog, profile, *, device, threads):
+def check_training_batch(catalog, profile, *, device, threads, seed=0):
     """Exercise actual features, native masks, decoder, gradients AND AdamW state.
 
-    The model/optimizer are discarded. run_training resets seed 0 and creates a
+    The model/optimizer are discarded. run_training resets the seed and creates a
     separate fresh model afterward; no preflight update enters the experiment.
     """
-    runtime = common.configure_runtime(0, device, threads)
+    runtime = common.configure_runtime(seed, device, threads)
     records = catalog.select(("train",), limit_per_split=profile["batch_size"])
     if len(records) != profile["batch_size"]:
         raise ValueError("Not enough train patches to check the requested physical batch size.")
@@ -88,11 +91,43 @@ def training_arguments(args, profile, output):
         "--manifest", str(args.manifest), "--inspection", str(args.inspection),
         "--feature-dir", str(args.feature_dir), "--output", str(output),
         "--device", args.device, "--threads", str(args.threads),
-        "--epochs", "50", "--patience", "50", "--seed", "0",
+        "--epochs", "50", "--patience", "50", "--seed", str(args.seed),
         "--batch-size", str(profile["batch_size"]),
         "--learning-rate", str(profile["learning_rate"]),
         "--weight-decay", "5e-6", "--warmup-epochs", "3", "--log-every", "1",
     ])
+
+
+def verify_reference(path, train_args, catalog):
+    """Check comparability with an existing member before any optimizer step.
+
+    The seed and output paths may differ. Exact source, runtime, data and cohort
+    checks ensure that the unchanged trainer has the same scientific settings.
+    Source hashes use LF to match the reference configuration written on Linux.
+    """
+    path = Path(path).resolve()
+    reference = json.loads(path.read_text(encoding="utf-8"))
+    if reference.get("seed") == train_args.seed:
+        raise ValueError("An additional ensemble member must use a different seed from the reference.")
+    expected = {key: getattr(train_args, key) for key in
+                ("device", "threads", "epochs", "batch_size", "log_every", "learning_rate",
+                 "weight_decay", "patience", "warmup_epochs", "debug")}
+    expected.update(
+        max_batches=None, architecture=common.ARCHITECTURE,
+        decoder_sources=common.decoder_sources(), versions=common.runtime_versions(),
+        implementation_sha256={
+            path.name: hashlib.sha256(path.read_text(encoding="utf-8").encode()).hexdigest()
+            for path in (Path(training.__file__), Path(common.__file__))},
+        data_provenance=catalog.provenance,
+        selected_patches={split: [row["patch_id"] for row, _ in catalog.select((split,))]
+                          for split in ("train", "validation")},
+    )
+    mismatches = [key for key, value in expected.items() if reference.get(key) != value]
+    if mismatches:
+        raise ValueError("Reference configuration differs in: " + ", ".join(mismatches)
+                         + ". Keep the same training code, environment, data and settings.")
+    return {"path": str(path), "sha256": common.cache.digest(path),
+            "seed": reference["seed"], "matching_fields": list(expected), "passed": True}
 
 
 def run_trial(args):
@@ -101,8 +136,10 @@ def run_trial(args):
     if args.threads < 1:
         raise ValueError("Threads must be positive.")
     profile = dict(TRIALS[args.trial_id])
-    output = Path(args.output_root).resolve() / args.run_group / profile["name"]
-    metadata_dir = Path(args.metadata_root).resolve() / args.run_group / profile["name"]
+    # Preserve historical seed-0 paths; different seeds always get separate directories.
+    member_name = profile["name"] + (f"_seed-{args.seed}" if args.seed else "")
+    output = Path(args.output_root).resolve() / args.run_group / member_name
+    metadata_dir = Path(args.metadata_root).resolve() / args.run_group / member_name
     for path in (output, metadata_dir):
         if path.exists() and (not path.is_dir() or any(path.iterdir())):
             raise ValueError(f"Trial directory already contains results; choose a new run group: {path}")
@@ -110,7 +147,8 @@ def run_trial(args):
     metadata_path = metadata_dir / "trial.json"
     train_args = training_arguments(args, profile, output)
     metadata = {"schema_version": 1, "trial_id": args.trial_id, "profile": profile,
-                "run_group": args.run_group, "created_at_utc": datetime.now(timezone.utc).isoformat(),
+                "seed": args.seed, "run_group": args.run_group,
+                "created_at_utc": datetime.now(timezone.utc).isoformat(),
                 "status": "preflight", "code": code_identity(),
                 "slurm": {key: os.environ.get(key) for key in
                           ("SLURM_JOB_ID", "SLURM_ARRAY_JOB_ID", "SLURM_ARRAY_TASK_ID", "SLURMD_NODENAME")},
@@ -121,11 +159,15 @@ def run_trial(args):
     common.cache.write_json(metadata_path, metadata)
     try:
         print(f"Trial {args.trial_id}: {profile['name']} | batch={profile['batch_size']} | "
-              f"lr={profile['learning_rate']} | seed=0 | epochs=50 | patience=50", flush=True)
+              f"lr={profile['learning_rate']} | seed={args.seed} | epochs=50 | patience=50", flush=True)
         print(f"Model output: {output}\nTrial metadata: {metadata_path}", flush=True)
         catalog = common.FeatureCatalog(args.manifest, args.inspection, args.feature_dir)
         metadata["data_provenance"] = catalog.provenance
-        metadata["preflight"] = check_training_batch(catalog, profile, device=args.device, threads=args.threads)
+        if args.reference_config is not None:
+            metadata["reference"] = verify_reference(args.reference_config, train_args, catalog)
+            print("Reference member configuration, data and training code match.", flush=True)
+        metadata["preflight"] = check_training_batch(catalog, profile, device=args.device,
+                                                     threads=args.threads, seed=args.seed)
         # Ensure no temporary optimizer/model allocation survives into training.
         gc.collect()
         if args.device == "cuda":
@@ -147,6 +189,9 @@ def parser():
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--trial-id", type=int, choices=range(len(TRIALS)), required=True)
     result.add_argument("--run-group", required=True, help="Fresh experiment group, normally the Slurm array job ID.")
+    result.add_argument("--seed", type=int, default=0, help="Decoder initialization and training shuffle seed.")
+    result.add_argument("--reference-config", type=Path,
+                        help="Existing member's config.json; require matching protocol, data and runtime, with a different seed.")
     result.add_argument("--manifest", type=Path, default=common.DEFAULT_MANIFEST)
     result.add_argument("--inspection", type=Path, default=common.DEFAULT_INSPECTION)
     result.add_argument("--feature-dir", type=Path, default=common.DEFAULT_CACHE)
