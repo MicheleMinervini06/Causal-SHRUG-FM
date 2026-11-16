@@ -19,6 +19,15 @@
 - Preserve original split/event identifiers and keep invalid pixels out of both
   prediction and reference fractions on explicitly matched support.
 
+# Code simplicity
+
+- Prefer the smallest clear implementation that satisfies the current task.
+  Every function and line should serve a concrete purpose; remove unused code,
+  redundant logic, and speculative abstractions instead of growing the codebase.
+- Reuse existing helpers where they fit. Add new abstractions or dependencies
+  only when they materially simplify the implementation or are necessary for
+  correctness. Keep scientific assumptions and meaningful checks explicit.
+
 # Local development and Anunna execution
 
 - Develop and review code locally in this workspace. Run small implementation

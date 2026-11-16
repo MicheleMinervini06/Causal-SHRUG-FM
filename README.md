@@ -889,3 +889,102 @@ code can be developed locally meanwhile; pull it on Anunna after training, or
 use a separate checkout. These jobs do not generate predictions or uncertainty
 scores. Later, combine the two new best checkpoints with the existing seed-0
 checkpoint, retaining every seed rather than selecting only the best member.
+
+## Ensemble predictions and task uncertainty
+
+`scripts/predict_segmentation_ensemble.py` loads compatible decoder checkpoints
+on the same verified feature cache. The encoder is not loaded or run. It calls
+each head once per patch in evaluation/inference mode, resizes **each member's
+logits** bilinearly to the native label grid, then applies softmax. It averages
+the resulting water probabilities, rather than logits or thresholded masks.
+At least two members are required; the current experiment uses seeds 0, 1 and 2.
+Duplicate seeds/checkpoint hashes, debug heads, incompatible caches/support,
+and differing training protocols or train/validation cohorts are rejected.
+
+For every pixel, binary probabilities are `[1 - p_water, p_water]`. Following
+[SHRUG-FM equations 7-9 and Table 4](https://arxiv.org/html/2511.10370v2), the
+script computes:
+
+| Output | Pixel calculation | Patch calculation |
+| --- | --- | --- |
+| `average_entropy` | Mean of member entropies | Mean over valid pixels with ensemble water probability >= `0.05` |
+| `mutual_information` | Entropy of ensemble mean minus mean member entropy | Mean over that same region |
+| `predictive_entropy` | Entropy of ensemble mean | Mean over that same region, retained as a diagnostic |
+
+Entropy uses natural logarithms (nats), float64 calculations and float32 exported
+maps. Tiny negative numerical MI is clamped to zero. The ROI is computed from
+the exported float32 ensemble probability. These are uncertainty signals, not
+calibrated confidence intervals for the water fraction.
+
+The original `EnsembleUQModel` implements the mean/MI mathematics; its
+`UQModel.entropy()` means **predictive entropy**, and the original tester exports
+that under `Entropy`. Average member entropy exists internally in MI but is not
+exported separately. The small `ensemble_maps()` helper makes all three quantities
+explicit and avoids the original API's repeated model forwards for different
+metrics. Analytical tests compare its results with the original class. We reuse
+our strict `load_head()`, native-grid resizing, `prediction_result()` and
+`write_raster()` helpers. The legacy full-model loader/checkpoint format and
+fixed 256-grid nearest resizing are not used.
+
+The **segmentation threshold remains `0.5`** (`--threshold`) for the predicted
+mask and water fraction. The separate **uncertainty ROI threshold is `0.05`**
+(`--roi-threshold`). It selects which pixels contribute to the patch uncertainty
+average; it does not change segmentation. The ROI intersects the audited valid
+support, without using reference water labels to select pixels. Reference and
+predicted fractions use the same native valid support as before. All probability
+and uncertainty maps cover this full valid support, with NaN outside it; masks
+use -1 outside support. An empty ROI gives blank CSV scores, `roi_empty=True`,
+and `n_roi_pixels=0`. This explicitly differs from original `metric_scaled()`,
+which returns zero for empty regions and has no separate validity mask.
+
+Each run writes `prediction_config.json` (member checkpoint paths/hashes, seeds,
+epochs, validation metrics, matching training protocol, data/cache identity,
+thresholds, runtime and code hashes), `prediction_summary.json`, and
+`predictions.csv`. CSV rows preserve patch/event/original split IDs, reference
+and ensemble-predicted water fractions, signed/absolute error, valid count,
+F1/IoU and raster paths. They also include semicolon-separated `model_seeds`,
+`n_members`, `roi_threshold`, `n_roi_pixels`, `roi_fraction`, `roi_empty`, and the
+three patch scores. Outputs are relative to the run directory:
+
+```text
+probabilities/PATCH_ID.tif
+masks/PATCH_ID.tif
+uncertainty/average_entropy/PATCH_ID.tif
+uncertainty/mutual_information/PATCH_ID.tif
+uncertainty/predictive_entropy/PATCH_ID.tif
+```
+
+Validation is the default split. Training predictions are in-sample; validation
+selected the heads; main splits share events. The script fits no decision tree
+or calibrator, and does not automatically open test/Bolivia samples. Limit a
+local implementation check with `--limit 2` and `--device cpu`, for example:
+
+```sh
+uv run --locked --extra encoder python -B scripts/predict_segmentation_ensemble.py \
+  --checkpoints PATH_TO_SEED0/best_head.pt PATH_TO_SEED1/best_head.pt PATH_TO_SEED2/best_head.pt \
+  --output results/segmentation_uncertainty/local-check --limit 2
+```
+
+For Anunna, **wait until both additional training tasks finish** before pulling
+these code changes into their checkout. After committing/pushing locally and
+pulling on Anunna, submit the validation inference job from the project root,
+replacing `TRAINING_ARRAY_ID` with the ID of the seeds-1-and-2 training array:
+
+```sh
+git pull --ff-only
+mkdir -p logs
+sbatch scripts/hpc/predict_segmentation_ensemble.sbatch TRAINING_ARRAY_ID
+```
+
+This reuses seed 0 from comparison array `44148765` and seeds 1/2 from the supplied
+training array, checks for completed training outputs, and requests one A100
+with four CPU cores, 16 GiB RAM and a one-hour limit. It uses the existing uv
+CUDA environment without installing dependencies. Results go to
+`results/segmentation_uncertainty/array-TRAINING_ARRAY_ID/job-JOBID/`. Follow logs:
+
+```sh
+tail -n 30 -F logs/segmentation-uncertainty-JOBID.out logs/segmentation-uncertainty-JOBID.err
+```
+
+For an explicitly chosen later evaluation, pass split names after the training
+array ID, e.g. `test bolivia_holdout`. Do not tune settings on those holdouts.
