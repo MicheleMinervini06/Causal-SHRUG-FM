@@ -1089,20 +1089,21 @@ uv run --locked --extra encoder python -B scripts/compute_spatial_density.py \
 ```
 
 On **Anunna**, after committing/pushing locally and pulling the code into the
-project, prepare the small input CSV once and submit the CPU job:
+project, submit the CPU job:
 
 ```sh
 git pull --ff-only
 module load 2025 uv
-uv run --no-sync python -B scripts/compute_spatial_density.py --download-only
 mkdir -p logs
 sbatch scripts/hpc/compute_spatial_density.sbatch
 ```
 
 The Slurm job uses the existing project environment without synchronizing or
 removing the installed CUDA extra. It requests **one CPU, 2 GiB RAM, 15 minutes**
-in the `main` partition; no GPU is requested. It performs no network download or
-package installation inside the batch job. Override the bandwidth, for example,
+in `main --constraint=gen2` (Skylake); no GPU is requested. It downloads/verifies
+the small public coordinate CSV on the allocated node before computing, with no
+package installation inside the job. Existing verified coordinates are reused.
+Override the bandwidth, for example,
 with `sbatch scripts/hpc/compute_spatial_density.sbatch 50`, using a separate
 output directory automatically. Results and logs are:
 
@@ -1111,6 +1112,18 @@ results/input_uncertainty/spatial_density/h-100km-job-JOBID/
 logs/spatial-density-JOBID.out
 logs/spatial-density-JOBID.err
 ```
+
+The architecture constraint is required by the current environment:
+`.venv/bin/python` resolves to the `skylake_avx512` Python 3.13.1 used on the
+A100 nodes, while `login201` and CPU `gen3` nodes use Zen3. Invoking that
+interpreter there fails with `Illegal instruction` / exit 132, even for
+`python --version`. Loading another Python module does not change the existing
+virtual environment's interpreter link. The
+[Anunna hardware table](https://wiki.anunna.wur.nl/Compute_Hardware_Overview)
+identifies CPU `gen2` and A100 nodes as Skylake. The batch loads modules on its
+allocated node and logs both Python paths; keep the working training `.venv`.
+Use the local `--download-only` examples above on a compatible machine, rather
+than running this environment on the Zen3 login node.
 
 Keep these raw features and their settings fixed when comparing them with U_T.
 Inspect both within-event variation and between-event differences before

@@ -43,6 +43,12 @@
 - Build a separate Linux `.venv` on Anunna using uv; never copy the Windows
   environment. Use `--extra encoder` for local CPU commands and
   `--extra encoder-cuda` for NVIDIA CUDA commands. These extras are exclusive.
+- The current Anunna `.venv` links to the `skylake_avx512` Python 3.13.1 from
+  the A100 nodes. CPU jobs reusing it must request `main --constraint=gen2`
+  (Skylake); it raises SIGILL/exit 132 on the Zen3 login/gen3 nodes. Load modules
+  inside the allocation. Check `readlink -f .venv/bin/python` and `$EBROOTPYTHON`
+  before reusing an environment across CPU architectures; do not retarget or
+  recreate the working training environment as a first response to this error.
 - Prepare/update the Anunna environment in a compute allocation when the
   dependency configuration changes: `uv sync --locked --extra encoder-cuda`.
   Use the prepared environment in batch jobs without installing packages there.
