@@ -18,3 +18,29 @@
   label-support, architecture, and evaluation differences from SHRUG-FM.
 - Preserve original split/event identifiers and keep invalid pixels out of both
   prediction and reference fractions on explicitly matched support.
+
+# Local development and Anunna execution
+
+- Develop and review code locally in this workspace. Run small implementation
+  checks locally; use Anunna for GPU checks and substantial training/evaluation.
+- Synchronize source code, Slurm scripts, `pyproject.toml`, and `uv.lock` through
+  the user's Git repository (`origin`); keep the original SHRUG-FM repository as
+  `upstream`. Commit/push only when authorized; do not assume local edits have
+  already reached GitHub or Anunna.
+- On Anunna, use the project on assigned Lustre storage. Its current location is
+  `/lustre/nobackup/WUR/AIN/miner003/SHRUG-FM`. Preserve existing data, cached
+  features, audit reports, environments, logs, results, and checkpoints during
+  code updates or Git setup. They are not transferred by a normal Git pull.
+- Build a separate Linux `.venv` on Anunna using uv; never copy the Windows
+  environment. Use `--extra encoder` for local CPU commands and
+  `--extra encoder-cuda` for NVIDIA CUDA commands. These extras are exclusive.
+- Prepare/update the Anunna environment in a compute allocation when the
+  dependency configuration changes: `uv sync --locked --extra encoder-cuda`.
+  Use the prepared environment in batch jobs without installing packages there.
+- Submit substantial computation through Slurm, not directly on login nodes.
+  Use VS Code Remote SSH for light inspection/editing, job submission and logs.
+- Keep a fixed code version for each active experiment. Pull updates between
+  runs; use separate checkouts for concurrent runs needing different versions.
+  Preserve configuration, seed, data/cache identity, and code version for each run.
+- Review short-run metrics before full training. Bring small reports back for
+  analysis and retain important results/checkpoints outside unbacked-up storage.
