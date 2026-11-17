@@ -1128,3 +1128,124 @@ than running this environment on the Zen3 login node.
 Keep these raw features and their settings fixed when comparing them with U_T.
 Inspect both within-event variation and between-event differences before
 interpreting geographic density as a predictor of segmentation or fraction error.
+
+## Embedding uncertainty U_E
+
+The pipeline uses the **original** [SSL4EO-S12 Hugging Face mirror](https://huggingface.co/datasets/wangyi111/SSL4EO-S12),
+linked by the [dataset authors](https://github.com/zhu-xlab/SSL4EO-S12), pinned to
+revision `3f5ddad68ba2ea29d019b0cef6cf292ff8af0d62`. It does not substitute the
+updated v1.1 dataset or embeddings from another model. The released SHRUG-FM
+extractor selects CLS tokens but defaults to MAE; we reuse our verified **MoCo**
+encoder and existing preprocessing helper instead. No decoder is trained here.
+
+Three scripts perform the work:
+
+1. `download_ssl4eo_reference.py`: keep the **first 5,000 contiguous location
+   blocks in archive order**, then stop downloading. Keep **all seasons in each
+   selected block**. This is a preliminary prefix sample, not a random global
+   reference. Preserve each
+   image's 13 original uint16 TIFFs losslessly inside one NPZ. Save IDs, source
+   revision, selection order, season counts, per-image hashes and a completion summary.
+2. `cache_pretraining_embeddings.py`: nearest-resize each native band array to
+   264x264, as in the released SSL4EO wrapper, then use exactly the downstream
+   fixed flood mean/std and full-patch nearest-exact resize to 224x224. Run the
+   frozen encoder in eval/inference mode, float32, no augmentation/TF32/autocast.
+   Cache **384-D CLS vectors** with source/checkpoint/preprocessing/runtime identity.
+   Compatible individual caches are reused after interruption.
+3. `compute_embedding_uncertainty.py`: fit CPU **FAISS k-means, k=64**, seed 0,
+   100 iterations, 5 restarts, using all reference vectors (disable FAISS's
+   internal subsampling). Recompute cluster counts and mean **Euclidean** radii.
+   Apply SHRUG-FM equations 4–5 to our existing downstream CLS cache. Preserve
+   `patch_id,event_id,original_split`; no labels or segmentation errors enter fitting.
+
+For cluster j, `d_j = ||embedding-centroid_j||_2 / mean_radius_j`. Assign the
+nearest **raw Euclidean** centroid c, report `normalized_distance=d_c`, and
+`NCDD=sum_j(d_j)-64*d_c`. Higher normalized distance means more unfamiliar;
+lower NCDD means less separation. NCDD can be negative because assignment occurs
+before normalization; do not clip it. FAISS squared-L2 values are not radii.
+No extra embedding L2 normalization is applied. The authors' reference sample,
+seed and complete extraction/fitting settings are unavailable: these are a
+documented implementation of the same scores, not identical published values.
+
+**Download cost:** the full original L1C archive is **557.48 GB**, but this script
+now stops at the first band header of location 5,001 instead of reading it all.
+Expect roughly 20,000 seasonal images and a transfer/storage cost on the order of
+10 GB; actual counts/bytes are recorded, not assumed. Small read-ahead buffers
+can include bytes beyond the stopping header. Transient connections retry from
+their current byte offset; restarting the process rescans the prefix. Entire
+parts, if consumed, are verified against LFS SHA-256. Early stopping cannot verify
+the final partial part or the gzip end CRC: its downloaded prefix hash is recorded
+locally, and per-image hashes detect later changes, not source authenticity.
+The supplied 24-hour limit is an allocation ceiling, not a measured runtime.
+
+**Sampling limitation:** the first locations may have biased geographic and
+embedding coverage. Check their coverage and cluster occupancy before interpreting
+scores as global pretraining unfamiliarity. Noncontiguous location blocks within
+the scanned prefix or incomplete images cause an error. Completion means the
+requested subset is complete, not the full archive. Previous globally sampled
+runs use different directories and are not silently reused.
+
+There is no need to download 2,000 locations separately before 5,000. The summary
+records location order, and the embedding archive records location IDs: a nested
+2,000-location comparison can later reuse those vectors without another download
+or encoder pass. Such a comparison checks reference-size sensitivity; it does not
+remove the prefix sample's geographic bias.
+
+**Data limitation:** the original band geotransforms have small offsets (visible
+in the checked example). Per-band array resizing preserves the original loader's
+behavior; it does not repair geographic alignment. This is recorded in metadata.
+Pretraining patches also cover a different footprint from Sen1Floods11 patches.
+Keep these limitations when interpreting embedding distance as unfamiliarity.
+
+Small local checks, without a full reference download:
+
+```sh
+uv sync --locked --extra encoder
+uv run --locked --extra encoder python -B -m unittest tests.test_embedding_uncertainty
+uv run --locked --extra encoder python -u -B scripts/download_ssl4eo_reference.py \
+  --debug --output data/ssl4eo-s12/debug-reference
+uv run --locked --extra encoder python -u -B scripts/cache_pretraining_embeddings.py \
+  --reference data/ssl4eo-s12/debug-reference \
+  --output data/ssl4eo-s12/debug-reference/embeddings --batch-size 1
+```
+
+Debug downloads stop after **one first complete image**, explicitly mark the
+reference incomplete, and are rejected by cluster fitting. This verifies loading
+and the forward pass; it is not a representative reference sample.
+
+On **Anunna**, synchronize code through Git first. This change adds `faiss-cpu`
+to `pyproject.toml`/`uv.lock`; update the prepared environment in a compatible
+compute allocation before submitting the jobs:
+
+```sh
+git pull --ff-only
+module load 2025 uv slurm
+srun --partition=main --constraint=gen2 --cpus-per-task=1 --mem=4G --time=00:15:00 \
+  bash -lc 'module load 2025 uv; uv sync --locked --extra encoder-cuda'
+mkdir -p logs
+DOWNLOAD_JOB=$(sbatch --parsable scripts/hpc/download_ssl4eo_reference.sbatch)
+sbatch --dependency="afterok:${DOWNLOAD_JOB}" scripts/hpc/compute_embedding_uncertainty.sbatch
+```
+
+The first job uses CPU gen2 to match the existing interpreter; the second uses
+an A100 for reference encoding and then CPU FAISS within the same allocation.
+Both accept `[locations]` (default 5,000); pass identical arguments to both.
+Archive-prefix selection has no random sampling seed.
+The clustering seed remains 0 unless changed in the Python scoring CLI.
+They install no dependencies inside the batch jobs. Outputs are:
+
+```text
+data/ssl4eo-s12/reference-prefix-n5000/{reference_manifest.csv,download_config.json,download_summary.json,images/}
+data/ssl4eo-s12/reference-prefix-n5000/embeddings/{pretraining_cls.npz,embedding_summary.json,patches/}
+results/embedding_uncertainty/prefix-n5000-job-JOBID/{clusters.npz,embedding_uncertainty.csv,embedding_config.json,embedding_summary.json}
+logs/embedding-download-JOBID.{out,err}
+logs/embedding-uncertainty-JOBID.{out,err}
+```
+
+`clusters.npz` preserves the centroids, mean radii, counts and full protocol so
+future matching embeddings can be scored with the same reference. Scoring rejects
+encoder/preprocessing mismatches, incomplete/debug references, empty or zero-radius
+clusters, duplicate IDs and nonfinite vectors. At least `39*k` reference images
+are required. Fit/scoring output directories must be new/empty. The default
+downstream archive includes all usable splits; computing features does not
+evaluate test/Bolivia labels. Reliability analysis should remain validation-only.
