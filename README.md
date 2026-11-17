@@ -1418,3 +1418,112 @@ simulation, ATE estimator, or causal gain is implemented in this step.
 References: [SHRUG-FM methodology and appendix](https://arxiv.org/html/2511.10370v2),
 [scikit-learn missing-value routing](https://scikit-learn.org/stable/modules/tree.html#missing-values-support),
 [CART feature tolerance](https://github.com/scikit-learn/scikit-learn/blob/main/sklearn/tree/_partitioner.pxd).
+
+## E02: real confounder errors in a semi-synthetic causal benchmark
+
+`experiments/semisynthetic_confounder.py` extends E01 using the frozen gate's
+**test** export. It reuses E01's OLS treatment-coefficient estimator, including
+an intercept. No encoder, decoder or reliability gate is trained or retuned.
+Existing dependencies suffice; `pyproject.toml` and `uv.lock` are unchanged.
+
+The cohort is every usable audited test patch: currently **88**, including the
+six both-empty masks with undefined F1. F1 and missing U_T never filter this
+causal cohort. The loader verifies complete test IDs, reference valid support,
+the inspection checksum, and the reported frozen gate identity; it rejects
+validation scores and overlap with gate-fitting patches. It consumes exported
+scores without loading the model binary. Preserve the input export files.
+
+Reference fractions C, predicted fractions C_hat and gate scores remain fixed.
+Fit mean and population SD (`ddof=0`) once on all test reference fractions;
+apply that same center/scale to both C and C_hat, including every subset.
+At each repetition generate independent treatment uniforms and N(0,1) outcome
+noise, then simulate:
+
+```text
+T ~ Bernoulli(sigmoid(a0 + a1*C_standardized))
+Y = T + C_standardized + epsilon
+```
+
+Defaults: `a0=0`, `a1 in {0,1}`, true effect 1, **5,000 repetitions**, seed 42.
+The same uniforms/noise pair both assignment scenarios. Within a scenario every
+comparison uses subsets of the same full T/Y arrays. All three estimators
+(unadjusted, oracle, proxy) run on the full cohort and on gate/random selections
+at 75% and 50% retention: **88, 66 and 44 observations**. Exact sizes use
+`floor(coverage*n)`. Gate selection keeps lowest scores with independent uniform
+tie-breaking. Random rejection samples without replacement. Separate seeded
+streams make the selections independent of T/Y; 50% subsets are nested within
+75% subsets for each selection method. Ties and random subsets are redrawn each
+repetition, while the gate's scores and ranking rule remain fixed.
+
+Local implementation checks:
+
+```sh
+uv run --locked --extra encoder python -B -m unittest tests.test_semisynthetic_confounder tests.test_synthetic_confounder
+```
+
+After committing/pushing the reviewed code and pulling it on Anunna, submit
+from `/lustre/nobackup/WUR/AIN/miner003/SHRUG-FM`:
+
+```sh
+mkdir -p logs
+# Path used by the test jobs submitted after prediction job 44220183:
+TEST_GATE_DIR="results/reliability_gate/test_seed0-pred-job-44220183"
+
+# Small implementation check, with its own output directory:
+CHECK_JOB=$(sbatch --parsable scripts/hpc/semisynthetic_confounder.sbatch \
+  --gate-evaluation-dir "$TEST_GATE_DIR" --repeats 5 \
+  --output results/causal_e02/check_seed42)
+echo "$CHECK_JOB"
+tail -n 50 -F "logs/semisynthetic-confounder-${CHECK_JOB}.out" \
+  "logs/semisynthetic-confounder-${CHECK_JOB}.err"
+```
+
+Ctrl+C stops log monitoring without cancelling the job. Review successful
+completion/output before launching the full simulation in a separate directory:
+
+```sh
+E02_JOB=$(sbatch --parsable scripts/hpc/semisynthetic_confounder.sbatch \
+  --gate-evaluation-dir "$TEST_GATE_DIR" --repeats 5000 --seed 42 \
+  --output results/causal_e02/test_seed42)
+echo "$E02_JOB"
+tail -n 50 -F "logs/semisynthetic-confounder-${E02_JOB}.out" \
+  "logs/semisynthetic-confounder-${E02_JOB}.err"
+# Alternatively check state/completion:
+squeue -j "$E02_JOB"
+sacct -j "$E02_JOB" --format=JobID,State,Elapsed,ExitCode
+```
+
+The wrapper requests CPU `main --constraint=gen2`, one CPU, 4 GiB, 30 minutes;
+it reuses the prepared environment with `uv run --no-sync`. No GPU is needed.
+The default `--gate-config` points to the original fitted gate configuration;
+`--inspection` points to `results/segmentation_data/patches.csv`. For an exported
+local copy, pass these paths explicitly and use
+`uv run --locked --extra encoder python -B experiments/semisynthetic_confounder.py ...`.
+
+Outputs in a new/empty directory:
+
+```text
+config.json          protocol, scaling, seed, source hashes and code identity
+patches.csv          fixed aligned C/C_hat/scores, standardized values, IDs/support
+selections.csv       retained IDs, event counts, C distribution and proxy MAE per draw
+estimates.csv        three coefficients/statuses per scenario and selection draw;
+                     treatment counts and known-propensity/observed-C-range diagnostics
+summary.csv          signed/absolute bias, RMSE, SD, MCSE(bias), success/failure counts
+run_summary.json     completion marker, failed-fit reasons and output checksums
+```
+
+Bias is mean(estimate - 1); absolute bias is abs(mean(estimate - 1)), not mean
+absolute error. Compare RMSE as well: rejection can reduce bias while increasing
+variance. Non-estimable regressions stay in the output with a status and are
+counted; summary moments are conditional on successful fits and cannot be
+interpreted without those failure counts. The propensity diagnostic flags
+values outside [0.05,0.95] without clipping probabilities or trimming patches.
+
+This experiment is conditional on 88 fixed patches and fitted measurements;
+additional repetitions improve Monte Carlo precision, not geographic sample
+size. The reference-based generator is a synthetic causal mechanism, not an
+observed real treatment/outcome. The constant individual effect remains 1 in
+every selected subset. Preserve gate/coverage choices after inspecting results;
+shared events across main splits and possible changes in geographic/confounder
+composition remain limitations. No Bolivia experiment or interval-coverage
+analysis is included in this baseline.
