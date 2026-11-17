@@ -9,6 +9,7 @@ dependencies = [
     "matplotlib>=3.11.2",
     "numpy>=2.4.6",
     "rasterio>=1.4.4",
+    "scikit-learn>=1.9,<2",
 ]
 
 [project.optional-dependencies]

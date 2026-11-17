@@ -1269,3 +1269,152 @@ clusters, duplicate IDs and nonfinite vectors. At least `39*k` reference images
 are required. Fit/scoring output directories must be new/empty. The default
 downstream archive includes all usable splits; computing features does not
 evaluate test/Bolivia labels. Reliability analysis should remain validation-only.
+
+## Segmentation-failure gate and risk–coverage evaluation
+
+`scripts/segmentation_gate.py` has two separate commands: `train` and `evaluate`.
+It uses exported patch tables only: no encoder/decoder forward pass, raster
+loading, or causal-effect estimation. The released repository has uncertainty
+and pixel-calibration code, but no reusable selective-tree trainer was found.
+
+The first baseline fixes the three features selected for floods in SHRUG-FM:
+**average entropy at ROI 0.05, mutual information at ROI 0.05, spatial density**.
+The target is **failure = 1 when patch F1 < 0.60**; F1 exactly 0.60 is a success.
+The segmentation threshold remains 0.5. The tree uses Gini, maximum depth 3,
+minimum leaf size 5, no class weights and seed 0. There is no feature selection
+or hyperparameter search. Optional U_E scores are joined/exported and compared
+as baselines, but do not enter the fitted tree.
+
+Important implementation choices:
+
+- Fit only on **validation**, with five `StratifiedGroupKFold` folds grouped by
+  `event_id` for development out-of-fold (OOF) scores. Then fit the final tree on
+  all labelled validation rows. This differs from the paper's train+validation
+  classifier fit and standard flood CV. The decoder already used validation for
+  checkpoint selection; these OOF diagnostics do not make the full pipeline
+  independent of that selection. The final frozen gate is evaluated separately.
+- Keep undefined F1 when both foreground masks are empty. Such rows receive a
+  final-model score but are excluded from fitting and risk denominators. Do not
+  turn undefined F1 into a failure. On our validation export: 86 rows, 78 defined
+  F1 (51 failures), and 8 unlabelled rows.
+- Keep U_T missing on empty predicted ROIs. Scikit-learn's native NaN routing
+  scores these cases instead of dropping them or substituting zero. This retains
+  the labelled F1=0, empty-ROI failure. There are 2 missing-U_T rows, so all-label
+  risk curves use 78 rows while common-score baseline comparisons use 77.
+- Convert density internally by a **fixed factor 1e8**. Our km^-2 densities are
+  below CART's absolute feature tolerance at their original scale; leaving them
+  unscaled could silently suppress density splits. This fixed linear unit
+  conversion is applied identically at fit and inference and recorded in the
+  model configuration. Original densities are preserved in exported tables.
+- Reference fractions, predicted fractions, F1, IDs and event groups never enter
+  the tree feature matrix. They remain in the output for provenance/evaluation.
+
+Training input directories must contain complete exports:
+
+```text
+predictions-dir: predictions.csv, prediction_config.json, prediction_summary.json
+density-dir: spatial_density.csv, density_config.json, density_summary.json
+embedding-dir (optional): embedding_uncertainty.csv, embedding_config.json, embedding_summary.json
+```
+
+Joins verify unique patch IDs, event/split identities, ensemble members, thresholds,
+feature-cache identity, reference support, dataset/audit hashes and density/KDE
+settings. Evaluation must use the same ensemble and feature protocols as fitting.
+Training rejects a prediction export containing non-validation rows. Evaluation
+accepts one split at a time: `test` (default) or explicit `bolivia_holdout`.
+
+For local synthetic implementation checks only:
+
+```sh
+uv sync --locked --extra encoder
+uv run --locked --extra encoder python -B -m unittest tests.test_segmentation_gate
+```
+
+On Anunna, synchronize source and update the prepared environment in a compatible
+compute allocation once, because this change adds scikit-learn:
+
+```sh
+git pull --ff-only
+module load 2025 uv slurm
+srun --partition=main --constraint=gen2 --cpus-per-task=1 --mem=4G --time=00:15:00 \
+  bash -lc 'module load 2025 uv; uv sync --locked --extra encoder-cuda'
+mkdir -p logs
+```
+
+Set `VALIDATION_DIR` to the existing validation ensemble output directory (the
+directory containing the three prediction files); replace the placeholder:
+
+```sh
+VALIDATION_DIR="results/segmentation_uncertainty/array-44157060/job-VALIDATION_JOB_ID"
+DENSITY_DIR="results/input_uncertainty/spatial_density/h-100km-job-44166500"
+EMBEDDING_DIR="results/embedding_uncertainty/prefix-n5000-job-44198535"
+GATE_DIR="models/reliability_gate/three_features_seed0"
+
+sbatch scripts/hpc/segmentation_gate.sbatch train \
+  --predictions-dir "$VALIDATION_DIR" --density-dir "$DENSITY_DIR" \
+  --embedding-dir "$EMBEDDING_DIR" --output "$GATE_DIR"
+```
+
+The wrapper requests CPU gen2, 2 CPUs, 4 GiB and 15 minutes; it uses the existing
+environment without installation. Direct local commands use
+`uv run --locked --extra encoder python -B scripts/segmentation_gate.py train ...`.
+Follow `logs/segmentation-gate-JOBID.out` and `.err` with `tail -n 50 -F`.
+
+Training writes:
+
+```text
+gate.pkl                   frozen scikit-learn tree
+gate_config.json           features, scale, fitting IDs/events/folds, source hashes, versions, model hash
+gate_scores.csv            all validation patches; in-sample final scores and separate OOF scores
+tree_rules.txt, tree_structure.json, tree.png
+evaluation_summary.json    development OOF risk–coverage metrics
+risk_coverage.csv, risk_coverage.png, risk_coverage.pdf
+```
+
+Use **OOF scores** for validation diagnostics. `gate_score` in this training CSV
+comes from the final fitted tree and is marked `validation_in_sample`; it must
+not be presented as independent validation performance. Undefined-F1 rows have
+no OOF score but still receive a final-tree score. The exported leaf frequencies
+are ranking scores, not calibrated probabilities of failure. Use only the gate
+artifact produced by this script; evaluation checks its checksum and exact
+scikit-learn version. Native missing-value branches are explicit in
+`tree_structure.json`, including splits not fully described by text rules.
+
+Before final evaluation, freeze the protocol and obtain ensemble predictions for
+the untouched **test** split using the existing ensemble prediction script. Do
+not evaluate the gate on decoder-training predictions or refit it on test F1.
+Once a test prediction export is available, set its directory and run:
+
+```sh
+TEST_DIR="results/segmentation_uncertainty/array-44157060/job-TEST_JOB_ID"
+sbatch scripts/hpc/segmentation_gate.sbatch evaluate \
+  --predictions-dir "$TEST_DIR" --density-dir "$DENSITY_DIR" \
+  --embedding-dir "$EMBEDDING_DIR" --gate-dir "$GATE_DIR" \
+  --split test --output results/reliability_gate/test_seed0
+```
+
+Evaluation exports `gate_scores.csv` with `score_kind=held_out`, an evaluation
+summary, and risk–coverage CSV/PNG/PDF. It never calls `fit`. Two cohorts are
+reported: **all labelled** patches (gate vs random) and **common complete scores**
+(gate vs individual scores and random on the identical rows). Coverage is
+conditional on defined F1, with input/unlabelled/missing-U_T counts and included
+patch IDs recorded. It is not automatically coverage of the entire input set.
+
+Retain lowest uncertainty/failure scores; single-score directions are fixed:
+low entropy, low MI, high spatial density, low normalized distance and high NCDD.
+Equal tree scores are averaged **analytically over uniform within-tie ordering**,
+avoiding arbitrary ID ordering (the paper approximates this with permutations).
+Curves at partial leaves therefore represent randomized retention within ties.
+The random baseline is the exact expected failure rate on the same cohort.
+The oracle curve uses failure labels only as a diagnostic bound. AURC is mean
+risk over k/n for k=1..n; risk at 50%, 75%, 90% reports actual integer coverage.
+No confidence intervals or deployment threshold are inferred from those curves.
+
+Original train/validation/test splits share events: the summary reports event
+overlap explicitly. This held-out-patch evaluation does not establish generalization
+to new events. Bolivia remains a separately requested evaluation. No causal
+simulation, ATE estimator, or causal gain is implemented in this step.
+
+References: [SHRUG-FM methodology and appendix](https://arxiv.org/html/2511.10370v2),
+[scikit-learn missing-value routing](https://scikit-learn.org/stable/modules/tree.html#missing-values-support),
+[CART feature tolerance](https://github.com/scikit-learn/scikit-learn/blob/main/sklearn/tree/_partitioner.pxd).
