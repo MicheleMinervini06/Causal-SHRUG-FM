@@ -31,4 +31,6 @@ date -u
 srun uv run --no-sync python -u -B scripts/download_ssl4eo_reference.py \
     --locations "$LOCATIONS" \
     --output "data/ssl4eo-s12/reference-prefix-n${LOCATIONS}"
+srun uv run --no-sync python -u -B scripts/cache_pretraining_embeddings.py \
+    --reference "data/ssl4eo-s12/reference-prefix-n${LOCATIONS}" --audit-only
 date -u

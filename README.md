@@ -1147,7 +1147,8 @@ Three scripts perform the work:
    image's 13 original uint16 TIFFs losslessly inside one NPZ. Save IDs, source
    revision, selection order, season counts, per-image hashes and a completion summary.
 2. `cache_pretraining_embeddings.py`: nearest-resize each native band array to
-   264x264, as in the released SSL4EO wrapper, then use exactly the downstream
+   264x264, as in the released SSL4EO wrapper (**264 is the output size, not a
+   requirement on native TIFF dimensions; CRS is not needed for array encoding**), then use exactly the downstream
    fixed flood mean/std and full-patch nearest-exact resize to 224x224. Run the
    frozen encoder in eval/inference mode, float32, no augmentation/TF32/autocast.
    Cache **384-D CLS vectors** with source/checkpoint/preprocessing/runtime identity.
@@ -1194,6 +1195,11 @@ remove the prefix sample's geographic bias.
 **Data limitation:** the original band geotransforms have small offsets (visible
 in the checked example). Per-band array resizing preserves the original loader's
 behavior; it does not repair geographic alignment. This is recorded in metadata.
+Native band dimensions may vary, and some images may have no CRS. The CPU audit
+records dimension counts, missing CRS and non-264 B2 examples in
+`reference_audit.json`; it still rejects wrong band sets, non-uint16/multiband
+TIFFs, changed source hashes and images with no jointly valid support. These
+checks validate array loading, not geographic alignment.
 Pretraining patches also cover a different footprint from Sen1Floods11 patches.
 Keep these limitations when interpreting embedding distance as unfamiliarity.
 
@@ -1229,6 +1235,19 @@ sbatch --dependency="afterok:${DOWNLOAD_JOB}" scripts/hpc/compute_embedding_unce
 
 The first job uses CPU gen2 to match the existing interpreter; the second uses
 an A100 for reference encoding and then CPU FAISS within the same allocation.
+After downloading, the first job audits all reference images on CPU before
+releasing the dependent GPU job. If the download was already completed with an
+older script, run that audit separately before resubmitting the second job:
+
+```sh
+srun --partition=main --constraint=gen2 --cpus-per-task=2 --mem=4G --time=00:30:00 \
+  bash -lc 'module load 2025 uv; uv run --no-sync python -u -B scripts/cache_pretraining_embeddings.py --audit-only'
+```
+
+Wait for `REFERENCE AUDIT PASSED`, then submit
+`sbatch scripts/hpc/compute_embedding_uncertainty.sbatch 5000`. The current
+array reader writes `embeddings-native-v2` so older, incompatible partial caches
+are preserved. The raw reference images do not need another download.
 Both accept `[locations]` (default 5,000); pass identical arguments to both.
 Archive-prefix selection has no random sampling seed.
 The clustering seed remains 0 unless changed in the Python scoring CLI.
@@ -1236,7 +1255,8 @@ They install no dependencies inside the batch jobs. Outputs are:
 
 ```text
 data/ssl4eo-s12/reference-prefix-n5000/{reference_manifest.csv,download_config.json,download_summary.json,images/}
-data/ssl4eo-s12/reference-prefix-n5000/embeddings/{pretraining_cls.npz,embedding_summary.json,patches/}
+data/ssl4eo-s12/reference-prefix-n5000/reference_audit.json
+data/ssl4eo-s12/reference-prefix-n5000/embeddings-native-v2/{pretraining_cls.npz,embedding_summary.json,patches/}
 results/embedding_uncertainty/prefix-n5000-job-JOBID/{clusters.npz,embedding_uncertainty.csv,embedding_config.json,embedding_summary.json}
 logs/embedding-download-JOBID.{out,err}
 logs/embedding-uncertainty-JOBID.{out,err}

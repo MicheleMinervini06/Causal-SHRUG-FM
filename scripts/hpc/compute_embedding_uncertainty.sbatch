@@ -24,6 +24,8 @@ if [[ $# -gt 1 || ! "$LOCATIONS" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 REFERENCE="data/ssl4eo-s12/reference-prefix-n${LOCATIONS}"
+# Preserve caches produced by the earlier fixed-native-grid reader.
+EMBEDDINGS="${REFERENCE}/embeddings-native-v2"
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
 export MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
@@ -31,10 +33,10 @@ echo "Embedding uncertainty job ${SLURM_JOB_ID}; node $(hostname); reference ${R
 git rev-parse HEAD
 date -u
 srun uv run --no-sync --extra encoder-cuda python -u -B scripts/cache_pretraining_embeddings.py \
-    --reference "$REFERENCE" --output "${REFERENCE}/embeddings" \
+    --reference "$REFERENCE" --output "$EMBEDDINGS" \
     --device cuda --threads "${SLURM_CPUS_PER_TASK}" --batch-size 32
 srun uv run --no-sync python -u -B scripts/compute_embedding_uncertainty.py \
-    --reference "${REFERENCE}/embeddings/pretraining_cls.npz" \
+    --reference "${EMBEDDINGS}/pretraining_cls.npz" \
     --output "results/embedding_uncertainty/prefix-n${LOCATIONS}-job-${SLURM_JOB_ID}" \
     --threads "${SLURM_CPUS_PER_TASK}"
 date -u

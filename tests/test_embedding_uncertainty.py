@@ -11,11 +11,80 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+from rasterio.io import MemoryFile
+from rasterio.transform import from_origin
 
 from scripts import cache_encoder_features as cache
 from scripts import cache_pretraining_embeddings as reference
 from scripts import compute_embedding_uncertainty as ue
 from scripts import download_ssl4eo_reference as download
+
+
+class ReferenceReaderTests(unittest.TestCase):
+    def make_image(self, root, shape=(263, 265), *, georeferenced=False, dtype="uint16", all_invalid=False):
+        bands = {}
+        for band in cache.SENTINEL2_BANDS:
+            native = (44, 45) if band in ("B1", "B9", "B10") else shape
+            values = (np.arange(np.prod(native)).reshape(native) % 200 + 1).astype(dtype)
+            values[0, 0] = 0
+            if all_invalid:
+                values[:] = 0
+            profile = dict(driver="GTiff", height=native[0], width=native[1], count=1, dtype=dtype,
+                           nodata=0, transform=from_origin(400000, 5300000, 10, 10))
+            if georeferenced:
+                profile["crs"] = "EPSG:32631"
+            with MemoryFile() as memory:
+                with memory.open(**profile) as dataset:
+                    dataset.write(values, 1)
+                bands[band] = np.frombuffer(memory.read(), dtype=np.uint8)
+        path = root / "sample.npz"
+        cache.save_npz(path, **bands)
+        return path
+
+    def test_variable_native_grid_and_missing_crs_are_resized_and_reported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.make_image(Path(temporary))
+            raw, valid, properties = reference.read_reference_image(path)
+            self.assertEqual(raw.shape, (13, 264, 264))
+            self.assertEqual(raw.dtype, np.uint16)
+            np.testing.assert_array_equal(valid, raw != 0)
+            self.assertEqual(properties["native_band_shapes"]["B2"], [263, 265])
+            self.assertEqual(properties["native_band_shapes"]["B1"], [44, 45])
+            self.assertEqual(properties["bands_without_crs"], list(cache.SENTINEL2_BANDS))
+            # Nearest resampling samples native pixel centers, including rectangular inputs.
+            original = (np.arange(263 * 265).reshape(263, 265) % 200 + 1).astype("uint16")
+            original[0, 0] = 0
+            y = np.floor((np.arange(264) + .5) * 263 / 264).astype(int)
+            x = np.floor((np.arange(264) + .5) * 265 / 264).astype(int)
+            np.testing.assert_array_equal(raw[1], original[y[:, None], x[None, :]])
+
+    def test_canonical_grid_still_works_and_bad_dtype_or_support_fail(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            raw, valid, properties = reference.read_reference_image(self.make_image(root, (264, 264), georeferenced=True))
+            self.assertEqual(raw.shape, valid.shape)
+            self.assertFalse(properties["bands_without_crs"])
+            with self.assertRaisesRegex(ValueError, "sample.npz, B1: expected one uint16 band"):
+                reference.read_reference_image(self.make_image(root, dtype="uint8"))
+            with self.assertRaisesRegex(ValueError, "sample.npz: no jointly valid"):
+                reference.read_reference_image(self.make_image(root, all_invalid=True))
+
+    def test_audit_checks_hashes_and_geometry_without_loading_encoder(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = self.make_image(root)
+            cache.write_index(root / "reference_manifest.csv", [{"patch_id": "sample", "location_id": "0000001",
+                              "season_id": "seasonA", "image_path": path.name, "sha256": cache.digest(path)}])
+            cache.write_json(root / "download_summary.json", {"manifest_sha256": cache.digest(root / "reference_manifest.csv")})
+            with patch.object(cache, "encoder_dependencies", side_effect=AssertionError("No encoder in CPU audit")):
+                report = reference.encode(root, root / "features", root / "missing-checkpoint", root / "missing-settings", audit_only=True)
+            self.assertEqual(report["n_images_with_missing_crs"], 1)
+            self.assertEqual(report["n_images_with_non_264_B2"], 1)
+            self.assertTrue((root / "reference_audit.json").exists())
+            self.assertFalse((root / "features").exists())
+            path.write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "Changed reference image: sample"):
+                reference.encode(root, root / "features", root / "missing-checkpoint", root / "missing-settings", audit_only=True)
 
 
 class ScoreTests(unittest.TestCase):

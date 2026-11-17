@@ -14,12 +14,10 @@ import numpy as np
 
 if __package__:
     from . import cache_encoder_features as cache
-    from .cache_pretraining_embeddings import representation
-    from .download_ssl4eo_reference import DEFAULT_OUTPUT
+    from .cache_pretraining_embeddings import DEFAULT_EMBEDDINGS, representation
 else:
     import cache_encoder_features as cache
-    from cache_pretraining_embeddings import representation
-    from download_ssl4eo_reference import DEFAULT_OUTPUT
+    from cache_pretraining_embeddings import DEFAULT_EMBEDDINGS, representation
 
 
 def checked_matrix(values):
@@ -138,7 +136,7 @@ def run(reference, downstream, output, *, clusters=64, seed=0, threads=4, iterat
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--reference", type=Path, default=DEFAULT_OUTPUT / "embeddings/pretraining_cls.npz")
+    parser.add_argument("--reference", type=Path, default=DEFAULT_EMBEDDINGS / "pretraining_cls.npz")
     parser.add_argument("--downstream", type=Path, default=cache.ROOT / "data/sen1floods11/encoder_features/ssl4eo-s12-moco/cls_embeddings.npz")
     parser.add_argument("--output", type=Path, default=cache.ROOT / "results/embedding_uncertainty/k64-seed0")
     parser.add_argument("--clusters", type=int, default=64)
