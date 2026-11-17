@@ -28,6 +28,14 @@
   only when they materially simplify the implementation or are necessary for
   correctness. Keep scientific assumptions and meaningful checks explicit.
 
+# Project research note
+
+- Keep `C:\Users\miner003\OneDrive - Wageningen University & Research\Documenten\Obsidian Vault\6 - Main Note\Projects\Causal-UQ.md`
+  updated as substantive project results, decisions, limitations and open paths change.
+- Update the relevant experiment and next steps concisely. Preserve unrelated
+  sections; refer to detailed repository reports instead of duplicating tables
+  or routine logs in the note.
+
 # Local development and Anunna execution
 
 - Develop and review code locally in this workspace. Run small implementation
