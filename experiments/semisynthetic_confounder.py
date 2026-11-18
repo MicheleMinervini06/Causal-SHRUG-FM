@@ -94,16 +94,17 @@ def standardize(patches):
              "policy": "same fixed center/scale for reference, proxy, scenarios and subsets"})
 
 
-def selections(patches, seed, repetition):
+def selections(patches, seed, repetition, *, extra_gates=()):
     """Nested exact-size selections, independent of simulated treatment/outcome."""
     n = len(patches)
     tie_rng = Random(f"E02:{seed}:{repetition}:gate_ties")
     ties = [tie_rng.random() for _ in patches]
-    gate_order = sorted(range(n), key=lambda i: (patches[i]["gate_score"], ties[i]))
+    gate_orders = [(name, sorted(range(n), key=lambda i: (patches[i][column], ties[i])))
+                   for name, column in (("gate", "gate_score"), *extra_gates)]
     random_order = Random(f"E02:{seed}:{repetition}:random_selection").sample(range(n), n)
     return [("full", 1., list(range(n)))] + [
         (name, coverage, order[:floor(coverage * n)]) for coverage in COVERAGES
-        for name, order in (("gate", gate_order), ("random", random_order))]
+        for name, order in [*gate_orders, ("random", random_order)]]
 
 
 def simulate(confounder, uniforms, noise, a0, a1):
@@ -126,7 +127,7 @@ def estimate(outcome, treatment, confounder, proxy):
     return result
 
 
-def run_simulation(patches, repeats, seed, a0):
+def run_simulation(patches, repeats, seed, a0, *, extra_gates=()):
     """Re-randomize T/epsilon and independent rejection/tie draws, not the patches."""
     if repeats < 1 or not isfinite(a0):
         raise ValueError("Repeats must be positive and a0 finite.")
@@ -138,7 +139,7 @@ def run_simulation(patches, repeats, seed, a0):
         assignment_rng = Random(f"E02:{seed}:{repetition}:treatment_uniforms")
         noise = [noise_rng.gauss(0, 1) for _ in patches]
         uniforms = [assignment_rng.random() for _ in patches]
-        subsets = selections(patches, seed, repetition)
+        subsets = selections(patches, seed, repetition, extra_gates=extra_gates)
         for name, coverage, indices in subsets:
             subset = [patches[i] for i in indices]
             selected_rows.append({"repetition": repetition, "selection": name, "target_coverage": coverage,
@@ -187,17 +188,20 @@ def summarize(estimates):
     return summaries
 
 
+def git_commit():
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, stderr=subprocess.DEVNULL).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
 def run(args):
     if args.output.exists() and (not args.output.is_dir() or any(args.output.iterdir())):
         raise ValueError("Use a new/empty output directory.")
     if args.repeats < 1 or not isfinite(args.a0):
         raise ValueError("Repeats must be positive and a0 finite.")
     patches, provenance = load_patches(args.gate_evaluation_dir, args.gate_config, args.inspection)
-    try:
-        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, stderr=subprocess.DEVNULL).strip()
-    except (OSError, subprocess.CalledProcessError):
-        commit = None
-    configuration = {**provenance, "git_commit": commit, "python_version": sys.version,
+    configuration = {**provenance, "git_commit": git_commit(), "python_version": sys.version,
                      "implementation_sha256": {p.name: digest(p) for p in (Path(__file__), ROOT / "experiments/synthetic_confounder.py")},
                      "n_patches": len(patches), "repeats": args.repeats, "seed": args.seed, "a0": args.a0,
                      "a1": ASSIGNMENT_STRENGTHS, "true_effect": TRUE_EFFECT, "outcome_confounder_coefficient": 1,

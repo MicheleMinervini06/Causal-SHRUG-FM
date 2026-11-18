@@ -1532,8 +1532,8 @@ analysis is included in this baseline.
 
 E03 changes the gate target while preserving the frozen segmentation ensemble,
 preprocessing, three reliability inputs (average entropy, mutual information,
-spatial density), depth 3, minimum leaf size 5 and seed 0. E02 artifacts and
-scripts remain unchanged. No new dependency is needed.
+spatial density), depth 3, minimum leaf size 5 and seed 0. Phase 2 reuses the
+E02 simulation and its archived control results.
 
 **Phase 1, implemented:** `scripts/train_fraction_error_gates.py` trains:
 
@@ -1609,13 +1609,52 @@ Final-model validation scores are in-sample; only OOF scores are used for the
 development comparisons. Review `training_summary.json`, `validation_scores.csv`,
 `validation_error_coverage.csv/.png` and both tree images before phase 2.
 
-**Phase 2, planned separately:** freeze both gate artifacts after the validation
-review, score all **88 test patches**, then compare against the fixed F1 gate,
-random rejection and full cohort using the paired E02 causal generator (5,000
-repetitions, seed 42, a1=0/1, true effect 1, same fixed standardization). Retain
-66/44 patches at 75/50%, preserve the same T/Y and tie/random-number streams,
-and assess fraction error, absolute causal bias, RMSE, overlap and composition.
-The phase-1 entry point does not read test exports or launch phase 2.
+### E03 phase 2 on Anunna
+
+`experiments.fraction_gate_causal` applies both reviewed Anunna models to the
+three features in the held-out F1 export. It verifies the recorded hashes for
+the two model files, the input table and the original E02 cohort. All **88**
+test patches participate, including empty foreground masks and missing
+entropy/MI. The frozen trees route missing features as in validation.
+
+The full run uses the E02 seed (42), reference scaling, treatment/outcome
+draws, random subsets and within-tie draws for 5,000 paired repetitions.
+Regression (primary), classification, F1 and random selection each retain
+66/44 patches at 75/50%. Full coverage uses all 88 patches once per scenario.
+Each subset gets unadjusted, oracle and proxy OLS estimates under randomized
+and confounded treatment. Completion of the full run requires agreement with
+all 30 archived E02 control summaries.
+
+After pushing the code and pulling it on Anunna, submit from the project root
+in the prepared environment. The wrapper uses one CPU on `main --constraint=gen2`.
+
+```bash
+mkdir -p logs
+JOB=$(sbatch --parsable scripts/hpc/fraction_gate_causal.sbatch)
+echo "$JOB"
+tail -n 50 -F "logs/fraction-gate-causal-${JOB}.out" "logs/fraction-gate-causal-${JOB}.err"
+```
+
+For a five-repetition check, use the same wrapper with
+`--repeats 5 --output results/causal_e03/check_seed42`. Every run needs a new
+output directory. Use `squeue -j "$JOB"` while queued and
+`sacct -j "$JOB" --format=JobID,State,Elapsed,ExitCode` after completion.
+
+Results go to `results/causal_e03/test_seed42/` by default.
+
+| File | Interpretation |
+|---|---|
+| `run_summary.json`, `config.json` | Completion, attempts/failures, checksums, frozen models and simulation settings |
+| `summary.csv` | Causal signed bias, absolute bias, RMSE and MCSE for every estimator, scenario and selection |
+| `paired_comparisons.csv` | Proxy-adjusted contrasts at matched coverage on repetitions where both fits succeeded. Signed bias and RMSE differences have 95% Monte Carlo intervals. Absolute bias difference is descriptive |
+| `selection_summary.csv` | Fraction MAE, pooled fraction RMSE, signed error and reference mean in fraction units, plus the share of patches above the two-point error threshold |
+| `event_composition.csv`, `selection_overlap.csv`, `treatment_overlap.csv` | Retention by event, shared patches between methods, and treated/control counts and propensity support |
+| `patches.csv`, `selections.csv`, `estimates.csv` | Patch-level scores, retained IDs and event counts, and individual simulated estimates and statuses |
+
+In the exports, `gate` denotes the original F1 gate. A negative
+`delta_absolute_bias` or `delta_rmse` favors the method in `selection` over
+`comparator`. The Monte Carlo intervals describe simulation precision for
+these fixed patches, predictions and gates.
 
 E03 is exploratory because these test patches informed the follow-up question.
 Better fraction MAE need not imply less residual confounding; preserve both
