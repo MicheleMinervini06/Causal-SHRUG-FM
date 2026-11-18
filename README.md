@@ -1527,3 +1527,99 @@ every selected subset. Preserve gate/coverage choices after inspecting results;
 shared events across main splits and possible changes in geographic/confounder
 composition remain limitations. No Bolivia experiment or interval-coverage
 analysis is included in this baseline.
+
+## E03: fraction-error gates, in two separate phases
+
+E03 changes the gate target while preserving the frozen segmentation ensemble,
+preprocessing, three reliability inputs (average entropy, mutual information,
+spatial density), depth 3, minimum leaf size 5 and seed 0. E02 artifacts and
+scripts remain unchanged. No new dependency is needed.
+
+**Phase 1, implemented:** `scripts/train_fraction_error_gates.py` trains:
+
+- Primary: `DecisionTreeRegressor(criterion="squared_error")` with target
+  `abs(predicted_fraction - reference_fraction)`. Its score predicts mean
+  absolute fraction error in units of fraction, not percentage points.
+- Secondary: the same classifier architecture as E02 with target
+  `abs(predicted_fraction - reference_fraction) > 0.02`. This is a strict
+  threshold of **two percentage points**, fixed before E03 evaluation.
+
+Both use exactly the original F1 gate's **78 validation fitting IDs** and its
+five event-grouped folds. The other eight undefined-F1 validation patches are
+preserved and receive final-model scores, but no OOF score; excluding them here
+keeps the fitting cohort identical across targets. Missing U_T stays NaN for
+native tree routing. The classifier has 32 positive labels in the real fitting
+cohort. No new fold search, feature selection or threshold tuning is performed.
+
+The script reuses `segmentation_gate.py` for strict prediction/density joins,
+protocol and support checks, feature construction, score export and binary
+risk calculations. It verifies the original F1 configuration, input checksums,
+scikit-learn version, fitting IDs and event separation before fitting. F1
+comparison scores are the saved OOF scores; that gate is not retrained.
+
+Review compares all three gates on the same 78 OOF patches using retained
+fraction MAE, fraction RMSE and the fraction-error failure rate, with exact
+expected ordering within ties. At 75/50% retention this development cohort has
+58/39 patches (actual coverages are saved). The full cohort, random expectation
+and an oracle error ranking are references. RMSE is the square root of expected
+retained squared error, not the expectation of a subset's RMSE. Validation was
+previously used for decoder checkpoint selection, so these remain development
+diagnostics.
+
+Local implementation checks use small synthetic fits:
+
+```sh
+uv run --locked --extra encoder python -B -m unittest tests.test_fraction_error_gates tests.test_segmentation_gate tests.test_semisynthetic_confounder
+```
+
+After commit/push and pulling the code on Anunna, run **phase 1 only** from the
+project root:
+
+```sh
+mkdir -p logs
+E03_JOB=$(sbatch --parsable scripts/hpc/train_fraction_error_gates.sbatch \
+  --predictions-dir results/segmentation_uncertainty/array-44157060/job-44161703 \
+  --density-dir results/input_uncertainty/spatial_density/h-100km-job-44166500 \
+  --f1-gate-dir models/reliability_gate/three_features_seed0 \
+  --output models/reliability_gate/e03_fraction_error_seed0)
+echo "$E03_JOB"
+tail -n 50 -F "logs/fraction-error-gates-${E03_JOB}.out" \
+  "logs/fraction-error-gates-${E03_JOB}.err"
+```
+
+The CPU wrapper requests `main --constraint=gen2`, two CPUs, 4 GiB and 15 minutes
+and uses the prepared environment with `uv run --no-sync`. Ctrl+C stops log
+monitoring without cancelling the job. Check status with `squeue -j "$E03_JOB"`
+or `sacct -j "$E03_JOB" --format=JobID,State,Elapsed,ExitCode`.
+
+Outputs in the new/empty E03 directory:
+
+```text
+training_summary.json                  completion, cohort, targets and OOF metrics
+validation_scores.csv                  aligned rows, errors and three OOF scores
+validation_error_coverage.csv/.png/.pdf retained fraction-error diagnostics
+regression/, classification/           each contains gate.pkl, gate_config.json,
+                                       gate_scores.csv, tree.png, tree_rules.txt,
+                                       tree_structure.json (including NaN routes)
+```
+
+Gate configurations use schema 2 and explicitly identify the new targets;
+the existing F1-only evaluation/causal loaders intentionally reject them.
+Final-model validation scores are in-sample; only OOF scores are used for the
+development comparisons. Review `training_summary.json`, `validation_scores.csv`,
+`validation_error_coverage.csv/.png` and both tree images before phase 2.
+
+**Phase 2, planned separately:** freeze both gate artifacts after the validation
+review, score all **88 test patches**, then compare against the fixed F1 gate,
+random rejection and full cohort using the paired E02 causal generator (5,000
+repetitions, seed 42, a1=0/1, true effect 1, same fixed standardization). Retain
+66/44 patches at 75/50%, preserve the same T/Y and tie/random-number streams,
+and assess fraction error, absolute causal bias, RMSE, overlap and composition.
+The phase-1 entry point does not read test exports or launch phase 2.
+
+E03 is exploratory because these test patches informed the follow-up question.
+Better fraction MAE need not imply less residual confounding; preserve both
+questions and the negative E02 baseline. Independent confirmation needs data
+kept out of development.
+
+Reference: [scikit-learn regression means and missing-value support](https://scikit-learn.org/stable/modules/tree.html).
