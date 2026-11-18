@@ -30,6 +30,10 @@
 
 # Project research note
 
+- Frame open questions around what we want to learn. A question should still
+  make sense if the dataset, method, or budget changes.
+- When we choose a question, describe the specific comparison, budget, and
+  success measures in the experiment. Put agreed actions in `Next steps`.
 - Keep `C:\Users\miner003\OneDrive - Wageningen University & Research\Documenten\Obsidian Vault\6 - Main Note\Projects\Causal-UQ.md`
   updated as substantive project results, decisions, limitations and open paths change.
 - Update the relevant experiment and next steps concisely. Preserve unrelated
