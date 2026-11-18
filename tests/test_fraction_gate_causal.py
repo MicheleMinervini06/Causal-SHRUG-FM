@@ -32,7 +32,8 @@ class PhaseTwoTests(unittest.TestCase):
             raw = e02.read_rows(scores_path)
             for i, row in enumerate(raw):
                 row.update(average_entropy=.4 if i else "", mutual_information=.01 if i else "",
-                           pretraining_density=(i + 1) * 1e-9, roi_empty=not i, event_id="test_event")
+                           pretraining_density=(i + 1) * 1e-9, roi_empty=not i, event_id="test_event",
+                           normalized_distance=i / 10, NCDD=-i)
             e02.write_csv(scores_path, raw[::-1])  # Gate scores and E02 patch table have different orders.
             e02.run(Namespace(output=e02_dir, repeats=4, seed=42, a0=0., gate_evaluation_dir=cls.root,
                               inspection=cls.root / "inspection.csv", gate_config=cls.root / "gate_config.json"))
@@ -49,6 +50,7 @@ class PhaseTwoTests(unittest.TestCase):
             e02.write_json(directory / "gate_config.json", {
                 "schema_version": 2, "kind": kind, "fit_split": "validation", "fit_patch_ids": ["validation_1"],
                 "delta": .02 if kind == "classification" else None,
+                "protocol": {"ensemble": "fixture"}, "parameters": tree.get_params(),
                 "f1_baseline_model_sha256": "frozen-model", "model_sha256": e02.digest(path),
                 "features": list(e03.gate.FEATURES), "density_scale": e03.gate.DENSITY_SCALE,
                 "sklearn_version": e03.sklearn.__version__})
@@ -146,6 +148,37 @@ class PhaseTwoTests(unittest.TestCase):
         patches, values, baseline, _ = e03.load_test(self.args.e02_dir, self.args.test_scores)
         with patch.object(pickle, "load", side_effect=AssertionError), self.assertRaisesRegex(ValueError, "Checksum mismatch"):
             e03.score_gates(gates, patches, values, baseline)
+
+    def test_embedding_comparison_replays_e03_and_uses_frozen_ue_scores(self):
+        ue = self.root / "ue"
+        ue.mkdir()
+        reg = e03.gate.read_json(self.args.gates_dir / "regression/gate_config.json")
+        model = DecisionTreeRegressor(random_state=0).fit(
+            [[.4, .01, .1, 0., 0.], [.4, .01, .1, 2., -20.]], [.1, .3])
+        path = ue / "gate.pkl"
+        path.write_bytes(pickle.dumps(model))
+        sha = e02.digest(path)
+        e02.write_json(ue / "training_summary.json", {"model_sha256": sha})
+        e02.write_json(ue / "gate_config.json", {**reg, "schema_version": 3, "kind": "regression_with_UE",
+                       "features": [*e03.gate.FEATURES, *e03.UE], "target": "absolute_fraction_error",
+                       "model_sha256": sha, "three_feature_model_sha256": reg["model_sha256"]})
+        args = Namespace(**{**vars(self.args), "ue_dir": ue, "e03_dir": self.args.output,
+                            "output": self.root / "extended"})
+        with patch.object(e03, "UE_MANIFEST", e02.digest(ue / "training_summary.json")), \
+             patch.object(e03, "E03_MANIFEST", e02.digest(args.e03_dir / "run_summary.json")), \
+             patch.object(DecisionTreeRegressor, "fit", side_effect=AssertionError), redirect_stdout(io.StringIO()):
+            e03.run(args, with_ue=True)
+        summary = e03.gate.read_json(args.output / "run_summary.json")
+        self.assertEqual(summary["e03_control_groups_verified"], 54)
+        contrasts = e02.read_rows(args.output / "paired_comparisons.csv")
+        self.assertEqual(len(contrasts), 4)
+        self.assertTrue(all((r["selection"], r["comparator"]) == ("regression_with_UE", "regression") for r in contrasts))
+        patches = e02.read_rows(args.output / "patches.csv")
+        self.assertEqual([float(r["NCDD"]) for r in patches], list(range(0, -20, -1)))
+        self.assertEqual({round(float(r["regression_with_UE_score"]), 6) for r in patches}, {.1, .3})
+        for name in ("estimates.csv", "selections.csv"):
+            controls = [r for r in e02.read_rows(args.output / name) if r["selection"] != "regression_with_UE"]
+            self.assertEqual(controls, e02.read_rows(args.e03_dir / name))
 
 
 if __name__ == "__main__":

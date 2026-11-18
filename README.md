@@ -1635,6 +1635,25 @@ validation patches for later use.
 
 ### E03 phase 2 on Anunna
 
+For the **five- versus three-feature held-out comparison**, use the existing
+batch script with `--with-ue` after pulling the updated code on Anunna:
+
+```bash
+mkdir -p logs
+JOB=$(sbatch --parsable scripts/hpc/fraction_gate_causal.sbatch --with-ue)
+echo "$JOB"
+tail -n 50 -F "logs/fraction-gate-causal-${JOB}.out" "logs/fraction-gate-causal-${JOB}.err"
+```
+
+This mode loads the frozen Anunna validation model and the original E03 gates.
+Normalized distance and raw NCDD come from the verified test export, aligned by patch ID.
+Outputs go to `results/causal_e03/ue_test_seed42/`. In `paired_comparisons.csv`
+the four rows give five minus three features for the proxy-adjusted estimator
+at both coverages in each treatment scenario. Read `selection_summary.csv`
+for fraction MAE/RMSE and `summary.csv` for causal bias/RMSE. The full run
+checks all 54 archived E03 and 30 E02 control groups. The comparison on the
+previously examined test cohort is exploratory.
+
 `experiments.fraction_gate_causal` applies both reviewed Anunna models to the
 three features in the held-out F1 export. It verifies the recorded hashes for
 the two model files, the input table and the original E02 cohort. All **88**
