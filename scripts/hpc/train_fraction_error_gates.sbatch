@@ -22,5 +22,10 @@ export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
 echo "E03 validation training job ${SLURM_JOB_ID}; node $(hostname)"
 git rev-parse HEAD
 date -u
-srun uv run --no-sync python -u -B scripts/train_fraction_error_gates.py "$@"
+script=scripts/train_fraction_error_gates.py
+if [[ "${1:-}" == "--with-ue" ]]; then
+    script=scripts/validate_embedding_gate.py
+    shift
+fi
+srun uv run --no-sync python -u -B "$script" "$@"
 date -u

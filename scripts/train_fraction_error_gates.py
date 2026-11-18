@@ -103,7 +103,7 @@ def comparison(rows, fit, rankings, output):
     rankings = {**rankings, "random_expected": np.zeros(len(error)), "oracle_diagnostic": error}
     exported, metrics = [], {}
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.8), layout="constrained")
-    colors = {"regression": "#2563eb", "classification": "#c2410c", "f1_gate": "#15803d",
+    colors = {"regression": "#2563eb", "regression_with_UE": "#922e87", "classification": "#c2410c", "f1_gate": "#15803d",
               "random_expected": "#64748b", "oracle_diagnostic": "black"}
     for name, scores in rankings.items():
         mae = retained_mean(scores, error)
@@ -133,18 +133,18 @@ def comparison(rows, fit, rankings, output):
     return metrics
 
 
-def save_tree(model, output, classification):
-    (output / "tree_rules.txt").write_text(export_text(model, feature_names=DISPLAY_FEATURES, decimals=6)
+def save_tree(model, output, classification, feature_names=DISPLAY_FEATURES):
+    (output / "tree_rules.txt").write_text(export_text(model, feature_names=feature_names, decimals=6)
                                           + "\nExact NaN routes are recorded in tree_structure.json.\n", encoding="utf-8")
     tree = model.tree_
-    structure = [{"node": i, "feature": DISPLAY_FEATURES[tree.feature[i]] if tree.feature[i] >= 0 else None,
+    structure = [{"node": i, "feature": feature_names[tree.feature[i]] if tree.feature[i] >= 0 else None,
                   "threshold": float(tree.threshold[i]) if np.isfinite(tree.threshold[i]) else "inf",
                   "left": int(tree.children_left[i]), "right": int(tree.children_right[i]),
                   "missing_go_to_left": bool(tree.missing_go_to_left[i]), "n_fit_samples": int(tree.n_node_samples[i]),
                   "value": tree.value[i].ravel().tolist()} for i in range(tree.node_count)]
     gate.cache.write_json(output / "tree_structure.json", structure)
     fig, ax = plt.subplots(figsize=(16, 7), layout="constrained")
-    plot_tree(model, feature_names=DISPLAY_FEATURES, class_names=["error <= 0.02", "error > 0.02"] if classification else None,
+    plot_tree(model, feature_names=feature_names, class_names=["error <= 0.02", "error > 0.02"] if classification else None,
               filled=True, ax=ax, fontsize=8)
     fig.savefig(output / "tree.png", dpi=170)
     plt.close(fig)

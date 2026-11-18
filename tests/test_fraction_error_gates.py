@@ -12,6 +12,7 @@ import numpy as np
 
 from scripts import segmentation_gate as gate
 from scripts import train_fraction_error_gates as fraction
+from scripts import validate_embedding_gate as ue
 from tests.test_segmentation_gate import fixture
 
 
@@ -121,6 +122,23 @@ class FractionGateTrainingTests(unittest.TestCase):
         changed[1]["failure"] = None
         with self.assertRaisesRegex(ValueError, "fitting cohort"):
             fraction.train(changed, self.protocol, self.sources, self.baseline_dir, self.root / "wrong-cohort")
+
+    def test_embedding_extension_scores_only_held_events_and_freezes_five_features(self):
+        rows = [{**row, "normalized_distance": i / 10, "NCDD": -i} for i, row in enumerate(self.rows)]
+        directory = self.root / "ue"
+        with redirect_stdout(io.StringIO()):
+            result = ue.validate(rows[::-1], self.protocol, self.sources, self.baseline_dir, self.output, directory)
+        config = gate.read_json(directory / "gate_config.json")
+        self.assertEqual(result["metrics"]["regression"], self.result["metrics"]["regression"])
+        self.assertEqual(config["features"], [*gate.FEATURES, *ue.UE])
+        self.assertEqual(config["fit_patch_ids"], self.baseline["fit_patch_ids"])
+        self.assertEqual(config["model_sha256"], gate.cache.digest(directory / "gate.pkl"))
+        exported = gate.cache.read_rows(directory / "validation_scores.csv", ("patch_id",))
+        self.assertEqual(sum(r["regression_with_UE_oof_score"] != "" for r in exported), 29)
+        self.assertTrue(all(np.isfinite(float(r["regression_with_UE_final_score"])) for r in exported))
+        with self.assertRaisesRegex(ValueError, "validation only"):
+            ue.validate([{**rows[0], "original_split": "test"}], self.protocol, self.sources,
+                        self.baseline_dir, self.output, self.root / "ue-invalid")
 
     def test_event_leakage_and_missing_OOF_scores_are_rejected(self):
         for problem in ("events", "OOF", "version"):

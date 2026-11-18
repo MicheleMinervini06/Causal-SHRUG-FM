@@ -1609,6 +1609,30 @@ Final-model validation scores are in-sample; only OOF scores are used for the
 development comparisons. Review `training_summary.json`, `validation_scores.csv`,
 `validation_error_coverage.csv/.png` and both tree images before phase 2.
 
+### E03 validation with embedding uncertainty
+
+Run `scripts/validate_embedding_gate.py` to add normalized distance and raw
+NCDD to the primary regressor. It checks the original three-feature OOF scores
+patch by patch, then compares both regressors on the same event-grouped folds
+at 75% and 50% retention (58 and 39 patches). The thresholds, tree settings,
+density scaling and treatment of ties are the same as in phase 1.
+
+From the project root on Anunna, after syncing the code:
+
+```bash
+mkdir -p logs
+JOB=$(sbatch --parsable scripts/hpc/train_fraction_error_gates.sbatch --with-ue)
+tail -n 50 -F "logs/fraction-error-gates-${JOB}.out" "logs/fraction-error-gates-${JOB}.err"
+```
+
+The default paths point to the archived validation predictions, density and
+embedding exports, F1 gate and original E03 validation run. The new model and
+its ordered feature list, hashes and folds are saved in
+`models/reliability_gate/e03_regression_with_ue_seed0/`. Review
+`training_summary.json` and `validation_error_coverage.png`. Only OOF scores
+are used for this comparison. The frozen tree is fitted to all 78 eligible
+validation patches for later use.
+
 ### E03 phase 2 on Anunna
 
 `experiments.fraction_gate_causal` applies both reviewed Anunna models to the
