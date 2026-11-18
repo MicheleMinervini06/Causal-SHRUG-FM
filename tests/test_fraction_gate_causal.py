@@ -15,6 +15,7 @@ import numpy as np
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
 from experiments import fraction_gate_causal as e03
+from experiments import fraction_gate_bias as e04
 from experiments import semisynthetic_confounder as e02
 from tests.test_semisynthetic_confounder import fixture
 
@@ -95,6 +96,20 @@ class PhaseTwoTests(unittest.TestCase):
             self.assertEqual(subsets["regression", c], subsets["gate", c])
             self.assertEqual(subsets["classification", c], subsets["gate", c])
         self.assertEqual(subsets["regression", .5], subsets["regression", .75][:10])
+
+    def test_bias_diagnostic_replays_e03_and_preserves_stratum_quotas(self):
+        patches = e02.read_rows(self.args.output / "patches.csv")
+        for row in patches:
+            row["regression_score"] = float(row["regression_score"])
+        summary, _ = e04.diagnose(patches, self.args.repeats, seed=42, a0=0.)
+        original = {(float(r["a1"]), r["selection"], float(r["target_coverage"])): float(r["bias"])
+                    for r in e02.read_rows(self.args.output / "summary.csv") if r["estimator"] == "proxy"}
+        for r in summary:
+            if r["selection"] in ("regression", "random"):
+                self.assertAlmostEqual(r["bias"], original[r["a1"], r["selection"], r["coverage"]])
+        # One saturated cell, one partially sampled cell and one with no quota.
+        strata = ["A", "A", "B", "B", "B", "C"]
+        self.assertEqual(e04.matched_sample([0, 1, 2], [5, 4, 2, 1, 0, 3], strata), [4, 1, 0])
 
     def test_paired_metrics_use_successful_pairs(self):
         methods = {"regression": [3., 1., None], "random": [1., 2., 9.], "classification": [1.] * 3, "gate": [None] * 3}

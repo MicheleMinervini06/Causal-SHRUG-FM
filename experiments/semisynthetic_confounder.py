@@ -94,17 +94,29 @@ def standardize(patches):
              "policy": "same fixed center/scale for reference, proxy, scenarios and subsets"})
 
 
-def selections(patches, seed, repetition, *, extra_gates=()):
-    """Nested exact-size selections, independent of simulated treatment/outcome."""
+def selection_orders(patches, seed, repetition, gates):
     n = len(patches)
     tie_rng = Random(f"E02:{seed}:{repetition}:gate_ties")
     ties = [tie_rng.random() for _ in patches]
     gate_orders = [(name, sorted(range(n), key=lambda i: (patches[i][column], ties[i])))
-                   for name, column in (("gate", "gate_score"), *extra_gates)]
+                   for name, column in gates]
     random_order = Random(f"E02:{seed}:{repetition}:random_selection").sample(range(n), n)
+    return [*gate_orders, ("random", random_order)]
+
+
+def selections(patches, seed, repetition, *, extra_gates=()):
+    """Nested exact-size selections, independent of simulated treatment/outcome."""
+    n = len(patches)
+    orders = selection_orders(patches, seed, repetition, (("gate", "gate_score"), *extra_gates))
     return [("full", 1., list(range(n)))] + [
         (name, coverage, order[:floor(coverage * n)]) for coverage in COVERAGES
-        for name, order in [*gate_orders, ("random", random_order)]]
+        for name, order in orders]
+
+
+def simulation_draws(patches, seed, repetition):
+    noise_rng = Random(f"E02:{seed}:{repetition}:outcome_noise")
+    assignment_rng = Random(f"E02:{seed}:{repetition}:treatment_uniforms")
+    return [assignment_rng.random() for _ in patches], [noise_rng.gauss(0, 1) for _ in patches]
 
 
 def simulate(confounder, uniforms, noise, a0, a1):
@@ -135,10 +147,7 @@ def run_simulation(patches, repeats, seed, a0, *, extra_gates=()):
     proxy = [r["proxy_standardized"] for r in patches]
     estimates, selected_rows = [], []
     for repetition in range(repeats):
-        noise_rng = Random(f"E02:{seed}:{repetition}:outcome_noise")
-        assignment_rng = Random(f"E02:{seed}:{repetition}:treatment_uniforms")
-        noise = [noise_rng.gauss(0, 1) for _ in patches]
-        uniforms = [assignment_rng.random() for _ in patches]
+        uniforms, noise = simulation_draws(patches, seed, repetition)
         subsets = selections(patches, seed, repetition, extra_gates=extra_gates)
         for name, coverage, indices in subsets:
             subset = [patches[i] for i in indices]
