@@ -63,7 +63,8 @@ def protocol(nodes):
                          "randomized assignment known p=0.5; confounded logit intercept and slope ~ N(0,2.5^2). "
                          "Uniform shared row of frozen validation posterior; conditioned on observed T,Y. "
                          "Gauss-Legendre integration over positive beta quantiles plus exact zero mass; "
-                         "posterior mean and equal-tailed 95% intervals.",
+                         "posterior mean and equal-tailed 95% intervals from the accepted batch "
+                         "(ESS >= 1000, max normalized weight < 0.02). Failed batches adapt both proposals.",
             "contrast": "with_scores minus proxy_only, paired normal MC intervals conditional on these patches"}
 
 
@@ -112,7 +113,7 @@ def run(args):
                 else:
                     result = inference.control(t, y, reference if method == "oracle" else proxy)
                 rows.append({"repetition": rep, "a1": strength, "method": method, "ess": None,
-                             "proposals": None, "max_weight": None, **result})
+                             "proposals": None, "retained_proposals": None, "max_weight": None, **result})
         if (rep-args.start+1) % 10 == 0:
             print(f"Completed repetition {rep+1}", flush=True)
     config = {**protocol(args.nodes), "integration_seed": args.integration_seed}

@@ -81,22 +81,28 @@ def log_likelihood(params, t, y, grid, masses, randomized):
         return np.log((likelihood * masses).sum(axis=2)).sum(axis=1) - len(t) * params[:, 3]
 
 
-def bayes(t, y, grid, masses, mean_c, randomized, seed):
-    proposal = proposal_distribution(t, y, mean_c, randomized)
-    rng = np.random.default_rng(seed)
-    prior_sd = np.array([5., 5., 5., 1.] + ([] if randomized else [2.5, 2.5]))
+def row_probabilities(center, t, y, grid, masses, randomized):
     # Tilt the row proposal toward calibrations supported by this T,Y. A uniform
     # component preserves support; the weight below restores the frozen row prior.
     log_row = np.empty(len(grid))
     for start in range(0, len(grid), 128):
         sl = slice(start, start + 128)
-        center = np.broadcast_to(proposal.loc, (len(grid[sl]), len(prior_sd)))
-        log_row[sl] = log_likelihood(center, t, y, grid[sl], masses[sl], randomized)
+        params = np.broadcast_to(center, (len(grid[sl]), len(center)))
+        log_row[sl] = log_likelihood(params, t, y, grid[sl], masses[sl], randomized)
     row_p = np.exp(.7 * (log_row - log_row.max()))
-    row_p = .8 * row_p / row_p.sum() + .2 / len(grid)
-    effects, logs = [], []
+    return .8 * row_p / row_p.sum() + .2 / len(grid)
+
+
+def bayes(t, y, grid, masses, mean_c, randomized, seed):
+    initial = proposal_distribution(t, y, mean_c, randomized)
+    proposal = initial
+    rng = np.random.default_rng(seed)
+    prior_sd = np.array([5., 5., 5., 1.] + ([] if randomized else [2.5, 2.5]))
+    attempted = 0
     for step in range(8):
         size = 2048 if step == 0 else 2048 * 2**(step-1)
+        attempted += size
+        row_p = row_probabilities(proposal.loc, t, y, grid, masses, randomized)
         params = proposal.rvs(size=size, random_state=rng)
         indices = rng.choice(len(grid), size=size, p=row_p)
         log_w = -.5 * np.sum((params / prior_sd)**2, axis=1) - proposal.logpdf(params)
@@ -104,22 +110,21 @@ def bayes(t, y, grid, masses, mean_c, randomized, seed):
         for start in range(0, size, 128):
             sl = slice(start, start + 128)
             log_w[sl] += log_likelihood(params[sl], t, y, grid[indices[sl]], masses[indices[sl]], randomized)
-        effects.extend(params[:, 1])
-        logs.extend(log_w)
-        w = np.exp(np.asarray(logs) - np.max(logs))
+        w = np.exp(log_w - np.max(log_w))
         w /= w.sum()
         ess = 1 / (w @ w)
         if ess >= 1000 and w.max() < .02:
-            order = np.argsort(effects)
-            tau, weights = np.asarray(effects)[order], w[order]
+            order = np.argsort(params[:, 1])
+            tau, weights = params[order, 1], w[order]
             lo, hi = np.interp([.025, .975], np.cumsum(weights) - .5 * weights, tau)
             return {"estimate": tau @ weights, "lower95": lo, "upper95": hi, "ess": ess,
-                    "proposals": len(w), "max_weight": w.max()}
-        if step == 0:
-            # Allow T,Y to move the joint slopes/variance away from the plug-in fit.
-            center = np.average(params, axis=0, weights=w)
-            cov = np.cov(params, rowvar=False, aweights=w, ddof=0)
-            blend = ess / (ess + 30)
-            proposal = multivariate_t(loc=blend*center + (1-blend)*proposal.loc,
-                                      shape=blend*cov + (1-blend)*proposal.shape, df=7)
-    raise ValueError(f"Importance sampling unresolved after {len(logs)} proposals (ESS={ess:.1f}).")
+                    "proposals": attempted, "retained_proposals": size, "max_weight": w.max()}
+        # Failed batches train the next proposal only. Keep a covariance floor
+        # from the plug-in fit so a single dominant draw cannot collapse it.
+        center = np.average(params, axis=0, weights=w)
+        cov = np.cov(params, rowvar=False, aweights=w, ddof=0)
+        blend = min(.95, ess / (ess + 30))
+        proposal = multivariate_t(loc=blend*center + (1-blend)*proposal.loc,
+                                  shape=blend*cov + (1-blend)*initial.shape, df=7)
+    raise ValueError(f"Importance sampling unresolved after {attempted} proposals "
+                     f"(last batch ESS={ess:.1f}, maximum weight={w.max():.4g}).")

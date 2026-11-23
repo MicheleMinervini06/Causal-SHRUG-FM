@@ -1,6 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 from scipy.special import expit
@@ -10,6 +11,28 @@ from experiments import fraction_causal_posterior as inference
 
 
 class PhaseTwoTests(unittest.TestCase):
+    def test_failed_batch_adapts_both_proposals_then_uses_fresh_draws(self):
+        rng = np.random.default_rng(43)
+        c = rng.normal(size=32)
+        t = rng.binomial(1, .5, len(c))
+        y = t + c + rng.normal(size=len(c))
+        # A point-mass calibration makes the oracle a check on the fitted effect.
+        grid = np.tile(c[None, :, None], (4, 1, 1))
+        masses = np.ones_like(grid)
+        initial = inference.proposal_distribution(t, y, c, True)
+        loc = initial.loc.copy()
+        loc[1] += 1.0
+        shifted = inference.multivariate_t(loc=loc, shape=initial.shape, df=7)
+        with patch.object(inference, "proposal_distribution", return_value=shifted), \
+                patch.object(inference, "row_probabilities", wraps=inference.row_probabilities) as row_updates:
+            result = inference.bayes(t, y, grid, masses, c, True, 42)
+        self.assertGreater(row_updates.call_count, 1)
+        self.assertFalse(np.array_equal(row_updates.call_args_list[0].args[0], row_updates.call_args.args[0]))
+        self.assertGreater(result["proposals"], result["retained_proposals"])
+        self.assertTrue(1000 <= result["ess"] <= result["retained_proposals"])
+        self.assertLess(result["max_weight"], .02)
+        self.assertAlmostEqual(result["estimate"], inference.control(t, y, c)["estimate"], delta=.08)
+
     def test_quadrature_retains_zero_mass_and_shared_missing_score_fallback(self):
         model = {"center": np.zeros(4), "scale": np.ones(4), "presence": np.zeros((2, 2)),
                  "proxy_only": np.zeros((2, 4)), "with_scores": np.zeros((2, 10))}
