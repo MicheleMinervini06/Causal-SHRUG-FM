@@ -1705,3 +1705,38 @@ questions and the negative E02 baseline. Independent confirmation needs data
 kept out of development.
 
 Reference: [scikit-learn regression means and missing-value support](https://scikit-learn.org/stable/modules/tree.html).
+
+## E05 phase 2 — propagate confounder uncertainty
+
+Use the frozen Phase 1 posterior for both Bayesian corrections. The experiment replays the
+5,000 E02 repetitions on all 88 patches, with randomized and confounded assignment. Each
+Bayesian draw shares a calibration row across all patches. Treatment and outcome jointly
+inform the latent fractions and the treatment coefficient. Oracle and raw-proxy OLS use
+model-based t intervals. The two Bayesian methods use equal-tailed posterior intervals.
+
+After syncing the source via Git, copy the reviewed Phase 1 draws from the **local project
+terminal**. The filename identifies the reviewed fit, and the runner checks its full SHA-256.
+
+```powershell
+scp results/causal_e05/phase1_seed42/posterior.npz miner003@login.anunna.wur.nl:/lustre/nobackup/WUR/AIN/miner003/SHRUG-FM/results/e05-posterior-390bc867.npz
+```
+
+On **Anunna**, from the project root, submit the array and a dependent aggregation job.
+
+```bash
+git pull --ff-only
+mkdir -p logs
+script=scripts/hpc/fraction_calibration_causal.sbatch
+job=$(sbatch --parsable --array=0-99%4 "$script" --posterior results/e05-posterior-390bc867.npz)
+root="results/causal_e05/phase2-array-$job"
+report=$(sbatch --parsable --dependency="afterok:$job" "$script" --collect "$root" --output "$root/combined")
+echo "simulation=$job report=$report"
+squeue -r -j "$job"
+tail -n 30 -F "logs/e05-causal-${job}_0.out" "logs/e05-causal-${job}_0.err"
+```
+
+Each task writes 50 complete repetitions atomically. Collection requires exactly one
+estimate per method, scenario and repetition, with a common protocol. The main report
+is `combined/paired_comparisons.csv` (with scores minus without scores) together with
+`combined/summary.csv` for absolute coverage, interval width, bias and RMSE.
+`combined/estimates.csv` records individual intervals and importance-sampling diagnostics.
