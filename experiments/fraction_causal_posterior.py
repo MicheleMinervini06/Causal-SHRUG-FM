@@ -68,8 +68,8 @@ def proposal_distribution(t, y, mean_c, randomized):
     return multivariate_t(loc=loc, shape=shape * 1.2, df=7)
 
 
-def log_likelihood(params, t, y, grid, masses, randomized):
-    """Integrate each latent C first, then multiply patch likelihoods within a shared draw."""
+def patch_log_kernels(params, t, y, grid, masses, randomized):
+    """Integrated patch kernels without the shared Gaussian normalization."""
     v = params[:, :, None, None]
     sigma = np.exp(v[:, 3])
     resid = (y[:, None] - v[:, 0] - v[:, 1] * t[:, None] - v[:, 2] * grid) / sigma
@@ -78,7 +78,12 @@ def log_likelihood(params, t, y, grid, masses, randomized):
         likelihood *= expit((2*t[:, None] - 1) * (v[:, 4] + v[:, 5] * grid))
     # Constant Gaussian and randomized-treatment normalizers cancel in the weights.
     with np.errstate(divide="ignore"):
-        return np.log((likelihood * masses).sum(axis=2)).sum(axis=1) - len(t) * params[:, 3]
+        return np.log((likelihood * masses).sum(axis=2))
+
+
+def log_likelihood(params, t, y, grid, masses, randomized):
+    """Integrate each latent C first, then multiply patch likelihoods within a shared draw."""
+    return patch_log_kernels(params, t, y, grid, masses, randomized).sum(axis=1) - len(t) * params[:, 3]
 
 
 def row_probabilities(center, t, y, grid, masses, randomized):
@@ -93,7 +98,7 @@ def row_probabilities(center, t, y, grid, masses, randomized):
     return .8 * row_p / row_p.sum() + .2 / len(grid)
 
 
-def bayes(t, y, grid, masses, mean_c, randomized, seed):
+def bayes(t, y, grid, masses, mean_c, randomized, seed, *, return_proposal=False):
     initial = proposal_distribution(t, y, mean_c, randomized)
     proposal = initial
     rng = np.random.default_rng(seed)
@@ -117,8 +122,11 @@ def bayes(t, y, grid, masses, mean_c, randomized, seed):
             order = np.argsort(params[:, 1])
             tau, weights = params[order, 1], w[order]
             lo, hi = np.interp([.025, .975], np.cumsum(weights) - .5 * weights, tau)
-            return {"estimate": tau @ weights, "lower95": lo, "upper95": hi, "ess": ess,
-                    "proposals": attempted, "retained_proposals": size, "max_weight": w.max()}
+            result = {"estimate": tau @ weights, "lower95": lo, "upper95": hi, "ess": ess,
+                      "proposals": attempted, "retained_proposals": size, "max_weight": w.max()}
+            if return_proposal:
+                return result, proposal, row_p
+            return result
         # Failed batches train the next proposal only. Keep a covariance floor
         # from the plug-in fit so a single dominant draw cannot collapse it.
         center = np.average(params, axis=0, weights=w)

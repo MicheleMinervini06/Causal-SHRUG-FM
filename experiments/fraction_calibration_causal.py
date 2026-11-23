@@ -80,14 +80,19 @@ def publish(output, rows, config):
         stage.rename(output)
 
 
-def run(args):
-    scores_path = verified(args.test_scores, TEST_SCORES)
+def cohort(scores_path):
+    scores_path = verified(scores_path, TEST_SCORES)
     patches = sorted(e02.read_rows(scores_path), key=lambda r: r["patch_id"])
     for r in patches:
         r["reference_fraction"] = float(r["reference_fraction"])
         r["predicted_fraction"] = float(r["predicted_fraction"])
     proxy = np.array([r["predicted_fraction"] for r in patches])
     scores = np.array([[calibration.number(r[k], missing=True) for k in calibration.FEATURES] for r in patches])
+    return patches, proxy, scores
+
+
+def run(args):
+    patches, proxy, scores = cohort(args.test_scores)
     # Only the simulator and oracle below receive the standardized reference.
     reference, _, _ = e02.standardize(patches)
     with np.load(verified(args.posterior, POSTERIOR), allow_pickle=False) as frozen:

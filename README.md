@@ -1740,3 +1740,53 @@ estimate per method, scenario and repetition, with a common protocol. The main r
 is `combined/paired_comparisons.csv` (with scores minus without scores) together with
 `combined/summary.csv` for absolute coverage, interval width, bias and RMSE.
 `combined/estimates.csv` records individual intervals and importance-sampling diagnostics.
+
+## E06 step 1 — verify one confounder measurement
+
+Keep the E05 cohort, simulator, 16 quadrature nodes and frozen validation draws.
+For each test patch, reveal its manual surface-water fraction while keeping the other
+87 fractions latent. The primary calibration is `proxy_only`. Repeat each update
+with `with_scores` on the same simulated treatments and outcomes. This step produces
+patch impacts for later comparison with the five reliability signals.
+
+Within each shared calibration draw, replace the selected patch's integrated
+treatment/outcome likelihood with its likelihood at the known fraction, multiplied
+by the calibration probability mass at zero or the density at its positive fraction.
+This also updates the weights of the shared calibration draws. Before and after use
+common importance proposals. Two independent integration streams must agree on the
+effect shift (within 0.005) and the change in interval width (within 0.02), with
+ESS at least 1,000 and maximum weight below 0.02 for each estimate. Unstable pairs
+use progressively larger batches, up to 524,288 proposals per stream. These are
+numerical tolerances in treatment-effect units. `calibration_only_ess` measures
+how many frozen validation draws effectively support a particular observed fraction
+before observing treatment and outcome. Additional proposals cannot create new
+calibration draws where that support is thin.
+
+After committing and pushing the source locally, run on Anunna from the project root:
+
+```bash
+git pull --ff-only
+mkdir -p logs
+script=scripts/hpc/single_patch_causal.sbatch
+job=$(sbatch --parsable --array=0-249%4 "$script")
+root="results/causal_e06/array-$job"
+report=$(sbatch --parsable --dependency="afterok:$job" "$script" --collect "$root" --output "$root/combined")
+echo "simulation=$job report=$report"
+squeue -u "$USER"
+tail -n 30 -F "logs/e06-${job}_0.out" "logs/e06-${job}_0.err"
+```
+
+Each task saves 20 repetitions, one atomic NPZ per repetition. Its configuration
+records the axes (assignment, calibration, patch, field). To resume interrupted
+tasks, use the same commit and set `E06_ROOT` to the original array's result
+directory when resubmitting those task indices. Submit the collector after the
+replacement tasks succeed. The full collector checks the four no-reveal summaries
+against the reviewed E05 results; use `--e05-summary PATH` if that CSV was moved.
+
+In `combined/`, check `run_summary.json` for unresolved pairs and the E05 replay
+difference. `patch_impacts.csv` reports paired after-minus-before changes in signed
+bias, RMSE, 95% interval width and coverage, with Monte Carlo standard errors.
+`paired_calibrations.csv` compares these changes with scores minus proxy only on
+jointly resolved repetitions. Each incomplete group reports its denominator.
+`no_reveal.csv` contains the original E05 baseline replay. All inferences are
+conditional on the fixed test patches and the frozen empirical calibration posterior.
