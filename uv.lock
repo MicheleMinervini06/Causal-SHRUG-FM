@@ -1888,6 +1888,8 @@ dependencies = [
     { name = "rasterio", version = "1.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-25-shrug-fm-causal-benchmark-encoder' and extra == 'extra-25-shrug-fm-causal-benchmark-encoder-cuda')" },
     { name = "rasterio", version = "1.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-25-shrug-fm-causal-benchmark-encoder' and extra == 'extra-25-shrug-fm-causal-benchmark-encoder-cuda')" },
     { name = "scikit-learn" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-25-shrug-fm-causal-benchmark-encoder' and extra == 'extra-25-shrug-fm-causal-benchmark-encoder-cuda')" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-25-shrug-fm-causal-benchmark-encoder' and extra == 'extra-25-shrug-fm-causal-benchmark-encoder-cuda')" },
 ]
 
 [package.optional-dependencies]
@@ -1915,6 +1917,7 @@ requires-dist = [
     { name = "pyyaml", marker = "extra == 'encoder-cuda'", specifier = ">=6,<7" },
     { name = "rasterio", specifier = ">=1.4.4" },
     { name = "scikit-learn", specifier = ">=1.9,<2" },
+    { name = "scipy", specifier = ">=1.15,<2" },
     { name = "timm", marker = "extra == 'encoder'", specifier = ">=1.0,<2" },
     { name = "timm", marker = "extra == 'encoder-cuda'", specifier = ">=1.0,<2" },
     { name = "torch", marker = "extra == 'encoder'", specifier = ">=2.7,<3", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "shrug-fm-causal-benchmark", extra = "encoder" } },
