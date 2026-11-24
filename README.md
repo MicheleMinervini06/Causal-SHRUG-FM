@@ -1790,3 +1790,46 @@ bias, RMSE, 95% interval width and coverage, with Monte Carlo standard errors.
 jointly resolved repetitions. Each incomplete group reports its denominator.
 `no_reveal.csv` contains the original E05 baseline replay. All inferences are
 conditional on the fixed test patches and the frozen empirical calibration posterior.
+
+## E06 step 2 — compare reliability scores with verification impacts
+
+Use the collector's `patch_impacts.csv` and `run_summary.json` with the original
+held-out `gate_scores.csv`. This analysis runs locally on CPU. It uses one
+observation per patch in each scenario and calibration. The primary comparison
+uses confounded assignment (`a1=1`) and `proxy_only`. Randomized assignment and
+`with_scores` are reported separately.
+
+After the collector succeeds, these PowerShell commands copy the small reports
+from the current Anunna run and use the existing local test-score archive:
+
+```powershell
+$localRun = 'results/causal_e06/array-44395645'
+New-Item -ItemType Directory -Force $localRun | Out-Null
+scp -r miner003@login.anunna.wur.nl:/lustre/nobackup/WUR/AIN/miner003/SHRUG-FM/results/causal_e06/array-44395645/combined $localRun
+uv run --no-sync python -B -m experiments.verification_scores --combined "$localRun/combined" --test-scores results/segmentation_runs/gate-test-pred-job-44220183-analysis/inputs/gate_scores.csv --output "$localRun/score-analysis"
+```
+
+Read `score_associations.csv` alongside `score_impacts.png`. The two primary
+endpoints are RMSE before minus after (positive means verification helped) and
+mean absolute movement of the effect estimate (influence in either direction).
+Secondary columns in the joined patch table include absolute bias reduction,
+interval narrowing, coverage change and the original absolute fraction error.
+All scores point toward greater uncertainty, using negative log density for
+spatial rarity and negative NCDD for poor cluster separation.
+
+For each score the report gives Spearman correlation and mean impact in the
+highest and lowest equally sized halves. The single middle rank is omitted for
+odd counts, with boundary ties averaged over their possible orderings. Halves
+summarize whole-cohort verification impacts; no causal model is fitted to a
+half. The within-event diagnostic correlates centered within-event percentile
+ranks for events with variation in both variables. These are descriptive
+associations on a fixed test cohort. Repetitions share patches and outcomes
+across comparisons.
+
+Use `population=complete` first. The `any_resolved` sensitivity includes
+incomplete patches using the collector's resolved pairs. Check denominators,
+missing scores, the supplied paired MCSEs and calibration ESS in
+`patch_scores_and_impacts.csv`. An undefined correlation is exported blank.
+`image_cases.csv` lists the nearest ranked patch to each score's 25th and 75th
+percentiles (ties ordered by patch ID), using the score file alone before
+reading verification impacts. These cases are for subsequent image review.
