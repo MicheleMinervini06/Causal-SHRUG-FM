@@ -1920,3 +1920,22 @@ the E05 importance-weight diagnostics. The largest change in a Bayesian effect
 estimate was 0.0080 (confounded, with scores). This check includes Monte Carlo
 sampling variation. If a small score advantage is decisive, check the paired
 contrast over multiple repetitions at higher resolution before interpreting it.
+
+### E07 single-patch verification
+
+Use the same Anunna input directory as the E05 replication. Add the audited
+`burnscars_ncdd_k64.csv` and the reviewed E07 `summary.csv` from the completed
+causal run. From the project root, `bash scripts/hpc/burn_single_patch.sbatch submit`
+submits preparation, an array of 250 × 20 repetitions (up to 16 concurrent), and
+a dependent report. Preparation saves the two quadrature grids and verification
+densities once. Workers check file hashes, map grids read-only, and log elapsed
+time per repetition. This verification uses confounded assignment only (`a1=1`).
+On all 263 scenes it compares proxy-only calibration (primary) with score-informed
+calibration (secondary), using the E06 integration tolerances and 5,000 paired repetitions.
+
+The launcher prints job IDs and the run directory. To resume a failed task, use
+the original commit and run directory with `sbatch --array=INDEX scripts/hpc/burn_single_patch.sbatch run "$root"`.
+After all shards finish, submit `sbatch scripts/hpc/burn_single_patch.sbatch collect "$root"`.
+Collection checks the baseline against reviewed E07 results. The five-score
+report in `score-analysis/` uses pooled ranks; within-fire associations are
+unavailable because these exports lack fire-event IDs.

@@ -44,3 +44,12 @@ class VerificationScoreTests(unittest.TestCase):
             analysis.join_impacts(scored, rows+[rows[0]], meta)
         with self.assertRaisesRegex(ValueError, "Missing"):
             analysis.join_impacts(scored, rows[1:], meta)
+
+        burn_protocol = {"experiment": "E07 burn scars, single-patch verification", "strengths": [1.]}
+        burn_meta = {**meta, "protocol": burn_protocol}
+        confounded = [r for r in rows if r["a1"] == 1.]
+        joined = analysis.join_impacts(scored, confounded, burn_meta, burn_protocol)
+        self.assertEqual({r["method"] for r in joined}, {"proxy_only", "with_scores"})
+        self.assertEqual({r["a1"] for r in analysis.associations(joined)}, {1.})
+        with self.assertRaisesRegex(ValueError, "Unexpected"):
+            analysis.join_impacts(scored, rows, burn_meta, burn_protocol)

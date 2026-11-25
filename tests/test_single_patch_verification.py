@@ -1,14 +1,53 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 from scipy.special import expit
 from scipy.stats import beta, multivariate_t
 
 from experiments import single_patch_verification as verification
+from experiments import burn_single_patch as burn
 from experiments.single_patch_causal import metrics
 
 
 class VerificationTests(unittest.TestCase):
+    def test_burn_cache_matches_direct_updates_and_rejects_damage(self):
+        rng = np.random.default_rng(42)
+        proxy = np.array([0., .2, .6, .05])
+        reference = np.array([.03, .3, .5, .04])
+        scores = rng.normal(size=(4, 3))
+        scores[0, :2] = np.nan
+        model = {"center": np.zeros(4), "scale": np.ones(4), "positive_only": True,
+                 "proxy_only": rng.normal(0, .1, (6, 4)), "with_scores": rng.normal(0, .1, (6, 10))}
+        with TemporaryDirectory() as tmp:
+            cache, posterior = Path(tmp)/"cache", Path(tmp)/"posterior.npz"
+            np.savez(posterior, **model)
+            patches = [{"reference_fraction": value} for value in reference]
+            burn.prepare(cache, posterior, patches, proxy, scores, {"nodes": 16})
+            loaded, ess = burn.load_cache(cache, {"nodes": 16})
+            for i, method in enumerate(burn.replay.METHODS):
+                direct, expected_ess = burn.replay.prepare_method(model, proxy, scores, reference, method)
+                np.testing.assert_array_equal(ess[i], expected_ess)
+                for old, new in zip(direct, loaded[method], strict=True):
+                    np.testing.assert_array_equal(old, new)
+                    self.assertFalse(new.flags.writeable)
+                t = np.array([0, 1, 1, 0])
+                proposal = multivariate_t(loc=np.zeros(6), shape=.1*np.eye(6), df=7)
+                def update(arrays):
+                    grid, mass, _, evidence = arrays
+                    return verification.batch(proposal, np.full(6, 1/6), grid, mass, evidence,
+                                              (reference-proxy.mean())/proxy.std(), t, t+reference,
+                                              False, np.arange(4), 256, np.random.default_rng(19))
+                for old, new in zip(update(direct), update(loaded[method]), strict=True):
+                    np.testing.assert_array_equal(old, new)
+            del loaded
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                burn.load_cache(cache, {"nodes": 32})
+            (cache/"proxy_only-grid.npy").write_bytes(b"bad")
+            with self.assertRaisesRegex(ValueError, "Damaged"):
+                burn.load_cache(cache, {"nodes": 16})
+
     def test_reference_likelihood_uses_zero_atom_and_positive_density(self):
         model = {"center": np.zeros(4), "scale": np.ones(4), "presence": np.array([[0., 0.], [1., 0.]]),
                  "proxy_only": np.array([[0., 0., 0., 0.], [.2, 0., 0., 0.]])}

@@ -51,15 +51,18 @@ def image_cases(scored):
     return cases
 
 
-def join_impacts(scored, impacts, meta):
+def join_impacts(scored, impacts, meta, expected_protocol=None):
     protocol = meta["protocol"]
     repeats = meta["repeats"]
-    if (protocol["experiment"] != "E06 single-patch verification" or protocol["test_scores_sha256"] != e05.TEST_SCORES
-            or protocol["posterior_sha256"] != e05.POSTERIOR or repeats < 1
+    if expected_protocol is None:
+        expected_protocol = {"experiment": "E06 single-patch verification", "test_scores_sha256": e05.TEST_SCORES,
+                             "posterior_sha256": e05.POSTERIOR}
+    if (any(protocol.get(k) != v for k, v in expected_protocol.items()) or repeats < 1
             or (repeats == e05.TOTAL and (meta["start"] != 0 or meta["max_e05_replay_difference"] is None
                                           or not 0 <= meta["max_e05_replay_difference"] <= 1e-8))):
         raise ValueError("Unexpected E06 cohort, calibration or baseline replay.")
-    expected = {(p, s, m) for p in scored for s in e02.ASSIGNMENT_STRENGTHS for m in e05.calibration.MODELS}
+    strengths = protocol.get("strengths", e02.ASSIGNMENT_STRENGTHS)
+    expected = {(p, s, m) for p in scored for s in strengths for m in e05.calibration.MODELS}
     rows = []
     for r in impacts:
         key = r["patch_id"], number(r["a1"]), r["method"]
@@ -111,6 +114,8 @@ def compare(x, y, events):
     # Percentile ranks put events of different sizes on a comparable scale.
     xs, ys = [], []
     for event in np.unique(events):
+        if not event:
+            continue
         mask = events == event
         if np.ptp(x[mask]) and np.ptp(y[mask]):
             for values, target in ((x, xs), (y, ys)):
@@ -123,7 +128,7 @@ def compare(x, y, events):
 
 def associations(rows):
     table = []
-    for strength in e02.ASSIGNMENT_STRENGTHS:
+    for strength in sorted({r["a1"] for r in rows}):
         for method in e05.calibration.MODELS:
             group = [r for r in rows if r["a1"] == strength and r["method"] == method]
             for name in SCORES:
@@ -135,7 +140,7 @@ def associations(rows):
                     for endpoint in ENDPOINTS:
                         y = np.array([r[endpoint] for r in used])
                         table.append({"a1": strength, "method": method, "score": name, "endpoint": endpoint,
-                                      "population": population, "n_patches": len(used), "n_events": len(set(events)),
+                                      "population": population, "n_patches": len(used), "n_events": len(set(events)-{""}),
                                       "missing_score": len(group)-len(defined), "excluded_resolution": len(defined)-len(used),
                                       "min_resolved": min((r["n_resolved"] for r in used), default=None),
                                       **compare(x, y, events)})
@@ -163,13 +168,16 @@ def plot_primary(rows, repeats, path):
 
 
 def run(combined, test_scores, output):
+    write_report(combined, output, scored_cohort(test_scores), "E06 score analysis", [test_scores])
+
+
+def write_report(combined, output, scored, experiment, sources, expected_protocol=None):
     if output.exists():
         raise ValueError(f"Choose a new report directory: {output}")
-    scored = scored_cohort(test_scores)
     cases = image_cases(scored)
     manifest, impacts = combined/"run_summary.json", combined/"patch_impacts.csv"
     meta = json.loads(manifest.read_text(encoding="utf-8"))
-    rows = join_impacts(scored, e02.read_rows(impacts), meta)
+    rows = join_impacts(scored, e02.read_rows(impacts), meta, expected_protocol)
     output.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=output.parent) as tmp:
         stage = Path(tmp)/"report"
@@ -178,12 +186,12 @@ def run(combined, test_scores, output):
             e02.write_csv(stage/(name+".csv"), table)
         plot_primary(rows, meta["repeats"], stage/"score_impacts.png")
         e02.write_json(stage/"analysis_summary.json", {
-            "experiment": "E06 score analysis", "repeats": meta["repeats"],
+            "experiment": experiment, "repeats": meta["repeats"], "strengths": meta["protocol"]["strengths"],
             "full_run": meta["repeats"] == e05.TOTAL, "n_unresolved": meta["n_unresolved"],
             "primary": "proxy_only, a1=1, complete patches; RMSE reduction and mean absolute effect shift",
             "directions": SCORES, "patches": len(scored), "uncertainty_unit": "patch",
             "simulation_commit": meta["protocol"]["git_commit"], "analysis_commit": e02.git_commit(),
-            "sha256": {p.name: e02.digest(p) for p in (manifest, impacts, test_scores, Path(__file__))}})
+            "sha256": {p.name: e02.digest(p) for p in (manifest, impacts, *sources, Path(__file__))}})
         stage.rename(output)
 
 
