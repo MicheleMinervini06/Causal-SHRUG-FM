@@ -101,7 +101,8 @@ def run(args):
     simulate_cohort(args, patches, proxy, scores, verified(args.posterior, POSTERIOR), protocol(args.nodes))
 
 
-def simulate_cohort(args, patches, proxy, scores, posterior_path, config):
+def simulate_cohort(args, patches, proxy, scores, posterior_path, config, *,
+                    max_batches=inference.STANDARD_BATCHES, recovery=None):
     # Only the simulator and oracle below receive the standardized reference.
     reference, _, _ = e02.standardize(patches)
     with np.load(posterior_path, allow_pickle=False) as frozen:
@@ -121,7 +122,8 @@ def simulate_cohort(args, patches, proxy, scores, posterior_path, config):
                 if method in grids:
                     try:
                         result = inference.bayes(t, y, *grids[method], randomized=strength == 0,
-                                                 seed=[args.integration_seed, rep, int(strength)])
+                                                 seed=[args.integration_seed, rep, int(strength)],
+                                                 max_batches=max_batches)
                     except ValueError as error:
                         raise ValueError(f"Repetition {rep}, a1={strength}, {method}: {error}") from error
                 else:
@@ -131,7 +133,10 @@ def simulate_cohort(args, patches, proxy, scores, posterior_path, config):
         if (rep-args.start+1) % 10 == 0:
             print(f"Completed repetition {rep+1}", flush=True)
     config = {**config, "integration_seed": args.integration_seed}
-    publish(args.output, rows, {"start": args.start, "repeats": args.repeats, "protocol": config})
+    manifest = {"start": args.start, "repeats": args.repeats, "protocol": config}
+    if recovery is not None:
+        manifest["recovery"] = recovery
+    publish(args.output, rows, manifest)
 
 
 def check_e02(summary, archive):
@@ -146,12 +151,18 @@ def check_e02(summary, archive):
 
 def collect(directory, output, repeats, e02_summary=Path("results/causal_e02/test_seed42/summary.csv"), *,
             experiment="E05 phase 2"):
-    rows, configs = [], []
+    rows, configs, recovered = [], [], []
+    recovery = None
     for path in sorted(directory.glob("shard-*/run_summary.json")):
         meta = json.loads(path.read_text())
         table = e02.read_rows(verified(path.with_name("estimates.csv"), meta["estimates_sha256"]))
         configs.append(meta["protocol"])
         rows.extend(table)
+        if "recovery" in meta:
+            if recovery is not None and meta["recovery"] != recovery:
+                raise ValueError("Incompatible recovery settings across shards.")
+            recovery = meta["recovery"]
+            recovered.append(path.parent.name)
     keys = {(int(r["repetition"]), float(r["a1"]), r["method"]) for r in rows}
     expected = {(i, a, m) for i in range(repeats) for a in e02.ASSIGNMENT_STRENGTHS for m in METHODS}
     if len(keys) != len(rows) or keys != expected or not configs or any(c != configs[0] for c in configs):
@@ -162,8 +173,12 @@ def collect(directory, output, repeats, e02_summary=Path("results/causal_e02/tes
     verify_e02 = repeats == TOTAL and experiment == "E05 phase 2"
     if verify_e02:
         check_e02(summarize(rows)[0], e02_summary)
-    publish(output, rows, {"start": 0, "repeats": repeats, "shards": len(configs), "protocol": configs[0],
-                           "full_e02_controls_verified": verify_e02})
+    manifest = {"start": 0, "repeats": repeats, "shards": len(configs), "protocol": configs[0],
+                "full_e02_controls_verified": verify_e02}
+    if recovery is not None:
+        manifest.update(recovery=recovery, recovered_shards=recovered,
+                        fits_needing_extra_batches=sum(int(r["proposals"] or 0) > 262144 for r in rows))
+    publish(output, rows, manifest)
 
 
 if __name__ == "__main__":

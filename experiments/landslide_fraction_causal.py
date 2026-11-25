@@ -2,8 +2,10 @@
 
 import argparse
 from ast import literal_eval
+from hashlib import sha256
 import json
 from pathlib import Path
+import subprocess
 
 import numpy as np
 from scipy.cluster.hierarchy import cut_tree, linkage
@@ -25,6 +27,7 @@ STAGE = EXPERIMENT + ", validation only"
 SUPPORT = ("Exported positive pixel counts divided by the full 64 x 64 reference-mask grid. "
            "The exports do not provide invalid-pixel counts. Cohort conditional on landslide-containing patches.")
 SIZE = {"val": 41, "test": 68}
+RECOVERY_BATCHES = 12
 
 
 def load_split(inputs, split):
@@ -81,6 +84,21 @@ def fit(args):
                                source_hashes=HASHES, burn_protocol=config)
 
 
+def recovery_protocol(path, current):
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    causal.verified(path.with_name("estimates.csv"), meta["estimates_sha256"])
+    archived = meta["protocol"]
+    expected = {**current, "git_commit": archived["git_commit"],
+                "implementation": dict(current["implementation"])}
+    for name in (Path(__file__).name, Path(causal.__file__).name, Path(causal.inference.__file__).name):
+        previous = subprocess.check_output(["git", "show", f"{archived['git_commit']}:experiments/{name}"],
+                                           cwd=e02.ROOT)
+        expected["implementation"][name] = sha256(previous).hexdigest()
+    if expected != archived or "recovery" in meta:
+        raise ValueError("Recovery requires a compatible, completed shard from the original landslide array.")
+    return archived
+
+
 def simulate(args):
     summary_path = args.calibration / "calibration_summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -99,7 +117,14 @@ def simulate(args):
                   source_sha256=HASHES, n_patches=len(patches), n_fallback=int((~np.isfinite(scores).all(axis=1)).sum()),
                   calibration_summary_sha256=e02.digest(summary_path), posterior_sha256=posterior_hash)
     config["implementation"][Path(__file__).name] = e02.digest(Path(__file__))
-    causal.simulate_cohort(args, patches, proxy, scores, posterior, config)
+    if args.resume_from:
+        config["integration_seed"] = args.integration_seed
+        original = recovery_protocol(args.resume_from, config)
+        causal.simulate_cohort(args, patches, proxy, scores, posterior, original,
+                               max_batches=RECOVERY_BATCHES,
+                               recovery={"execution_protocol": config, "max_batches": RECOVERY_BATCHES})
+    else:
+        causal.simulate_cohort(args, patches, proxy, scores, posterior, config)
 
 
 def main():
@@ -116,6 +141,8 @@ def main():
     sim.add_argument("--integration-seed", type=int, default=105)
     sim.add_argument("--start", type=int, default=0)
     sim.add_argument("--repeats", type=int, default=causal.TOTAL)
+    sim.add_argument("--resume-from", type=Path, metavar="RUN_SUMMARY",
+                     help="Allow extra sampling batches and verify compatibility with an original shard.")
     combine = commands.add_parser("collect")
     combine.add_argument("directory", type=Path)
     combine.add_argument("--repeats", type=int, default=causal.TOTAL)

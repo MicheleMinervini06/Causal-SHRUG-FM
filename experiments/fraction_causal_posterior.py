@@ -90,14 +90,17 @@ def row_probabilities(center, t, y, grid, masses, randomized):
     return .8 * row_p / row_p.sum() + .2 / len(grid)
 
 
-def bayes(t, y, grid, masses, mean_c, randomized, seed, *, return_proposal=False):
+STANDARD_BATCHES = 8
+
+
+def bayes(t, y, grid, masses, mean_c, randomized, seed, *, return_proposal=False, max_batches=STANDARD_BATCHES):
     initial = proposal_distribution(t, y, mean_c, randomized)
     proposal = initial
     rng = np.random.default_rng(seed)
     prior_sd = np.array([5., 5., 5., 1.] + ([] if randomized else [2.5, 2.5]))
     attempted = 0
-    for step in range(8):
-        size = 2048 if step == 0 else 2048 * 2**(step-1)
+    for step in range(max_batches):
+        size = 2048 * 2**min(max(step-1, 0), 9)
         attempted += size
         row_p = row_probabilities(proposal.loc, t, y, grid, masses, randomized)
         params = proposal.rvs(size=size, random_state=rng)
