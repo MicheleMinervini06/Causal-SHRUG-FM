@@ -1,4 +1,4 @@
-"""E08, landslide replication of E05 using the SHRUG-FM evaluation exports."""
+"""E07, landslide replication of E05 using the SHRUG-FM evaluation exports."""
 
 import argparse
 from ast import literal_eval
@@ -13,14 +13,14 @@ from experiments import fraction_calibration_causal as causal
 from experiments import semisynthetic_confounder as e02
 
 
-ROOT = Path("results/causal_e08")
+ROOT = Path("results/causal_e07/landslides")
 METRICS = "landslide_test_metrics.csv"
 DENSITY = "landslides_density.csv"
 HASHES = {
     METRICS: "82dfc08c9b2240ec0a3c08e2d05fa2a61bce51c6dc76a5549ac56956539cce8d",
     DENSITY: "a1974d9a279e87969563a643919e8af318aa17c2a9221834baad5378f0183b0b",
 }
-EXPERIMENT = "E08 landslides, E05 replication"
+EXPERIMENT = "E07 landslides, E05 replication"
 STAGE = EXPERIMENT + ", validation only"
 SUPPORT = ("Exported positive pixel counts divided by the full 64 x 64 reference-mask grid. "
            "The exports do not provide invalid-pixel counts. Cohort conditional on landslide-containing patches.")
@@ -86,7 +86,7 @@ def simulate(args):
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     if (summary["stage"] != STAGE or summary["source_sha256"] != HASHES or summary["seed"] != 42
             or summary["n_patches"] != SIZE["val"] or summary["support"] != SUPPORT):
-        raise ValueError("Expected the frozen E08 landslide validation posterior.")
+        raise ValueError("Expected the frozen E07 landslide validation posterior.")
     posterior_hash = summary["output_sha256"]["posterior.npz"]
     posterior = causal.verified(args.calibration / "posterior.npz", posterior_hash)
     with np.load(posterior, allow_pickle=False) as bank:
