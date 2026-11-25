@@ -66,6 +66,21 @@ class PhaseTwoTests(unittest.TestCase):
                     product *= mass[draw, i] @ kernel
                 self.assertAlmostEqual(result[draw], np.log(product))
 
+    def test_burn_positive_beta_preserves_zero_proxy_and_missing_score_fallback(self):
+        model = {"positive_only": np.array(True), "center": np.zeros(4), "scale": np.ones(4),
+                 "proxy_only": np.zeros((3, 4)), "with_scores": np.zeros((3, 10))}
+        model["with_scores"][:, 0] = 1.
+        proxy = np.array([0., .25])
+        scores = np.array([[np.nan, np.nan, .1], [.2, .3, .1]])
+        grid, mass = inference.latent_grid(model, proxy, scores, "with_scores", 32)
+        fractions = grid * proxy.std() + proxy.mean()
+        self.assertEqual(grid.shape, (3, 2, 32))
+        self.assertTrue((fractions > 0).all() and (fractions < 1).all())
+        np.testing.assert_allclose(mass.sum(axis=2), 1.)
+        mean = (fractions * mass).sum(axis=2)
+        np.testing.assert_allclose(mean[:, 0], .5, atol=.0001)
+        np.testing.assert_allclose(mean[:, 1], expit(1.), atol=.0001)
+
     def test_paired_summary_and_incomplete_shard(self):
         rows = [{"repetition": i, "method": m, "a1": a, "estimate": 1.1 if m == "with_scores" else 1.2,
                  "lower95": .9 if m == "with_scores" else 1.1, "upper95": 1.4}

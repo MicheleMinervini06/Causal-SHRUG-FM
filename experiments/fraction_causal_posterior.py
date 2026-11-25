@@ -12,15 +12,17 @@ def latent_grid(model, proxy, scores, method, nodes):
     """Integrate the beta part on its probability scale, retaining the exact atom at zero."""
     q, w = np.polynomial.legendre.leggauss(nodes)
     center, scale = proxy.mean(), proxy.std()
-    draws = len(model["presence"])
-    grid = np.empty((draws, len(proxy), nodes + 1))
-    masses = np.empty_like(grid)
+    hurdle = not model.get("positive_only", False)
+    draws = len(model["proxy_only"])
+    grid = np.empty((draws, len(proxy), nodes + int(hurdle)))
+    masses = np.empty_like(grid) if hurdle else np.broadcast_to(w / 2, grid.shape)
     for i, (value, features) in enumerate(zip(proxy, scores, strict=True)):
         present, a, b = predictive_components(model, value, features, method)
-        grid[:, i, 0] = 0.
-        grid[:, i, 1:] = betaincinv(a[:, None], b[:, None], (q + 1) / 2)
-        masses[:, i, 0] = 1 - present
-        masses[:, i, 1:] = present[:, None] * (w / 2)
+        grid[:, i, int(hurdle):] = betaincinv(a[:, None], b[:, None], (q + 1) / 2)
+        if hurdle:
+            grid[:, i, 0] = 0.
+            masses[:, i, 0] = 1 - present
+            masses[:, i, 1:] = present[:, None] * (w / 2)
     grid -= center
     grid /= scale
     if not np.isfinite(grid).all() or not np.isfinite(masses).all():

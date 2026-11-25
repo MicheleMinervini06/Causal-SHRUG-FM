@@ -51,18 +51,22 @@ def summarize(rows):
 
 
 def protocol(nodes):
-    return {"experiment": "E05 phase 2", "seed": 42, "nodes": nodes, "posterior_sha256": POSTERIOR,
-            "test_scores_sha256": TEST_SCORES, "implementation": {p.name: e02.digest(p) for p in
+    return {**joint_protocol(nodes, hurdle=True), "experiment": "E05 phase 2", "posterior_sha256": POSTERIOR,
+            "test_scores_sha256": TEST_SCORES, "controls": "OLS, model-based Student-t(85) intervals",
+            "simulation": "E02 full 88 patches, shared uniforms/noise, true tau=1, a0=0, a1=0/1"}
+
+
+def joint_protocol(nodes, *, hurdle):
+    atom = " plus exact zero mass" if hurdle else ""
+    return {"seed": 42, "nodes": nodes, "implementation": {p.name: e02.digest(p) for p in
             (Path(__file__), Path(inference.__file__), Path(calibration.__file__), Path(e02.__file__),
              Path(e02.__file__).with_name("synthetic_confounder.py"))},
             "git_commit": e02.git_commit(), "numpy": np.__version__, "scipy": scipy.__version__,
-            "simulation": "E02 full 88 patches, shared uniforms/noise, true tau=1, a0=0, a1=0/1",
-            "controls": "OLS, model-based Student-t(85) intervals",
             "inference": "latent fraction centered/scaled using only observed test proxy mean/SD; "
                          "Gaussian outcome intercept, tau, slope ~ independent N(0,5^2); log sigma ~ N(0,1); "
                          "randomized assignment known p=0.5; confounded logit intercept and slope ~ N(0,2.5^2). "
                          "Uniform shared row of frozen validation posterior; conditioned on observed T,Y. "
-                         "Gauss-Legendre integration over positive beta quantiles plus exact zero mass; "
+                         f"Gauss-Legendre integration over positive beta quantiles{atom}; "
                          "posterior mean and equal-tailed 95% intervals from the accepted batch "
                          "(ESS >= 1000, max normalized weight < 0.02). Failed batches adapt both proposals.",
             "contrast": "with_scores minus proxy_only, paired normal MC intervals conditional on these patches"}
@@ -93,9 +97,13 @@ def cohort(scores_path):
 
 def run(args):
     patches, proxy, scores = cohort(args.test_scores)
+    simulate_cohort(args, patches, proxy, scores, verified(args.posterior, POSTERIOR), protocol(args.nodes))
+
+
+def simulate_cohort(args, patches, proxy, scores, posterior_path, config):
     # Only the simulator and oracle below receive the standardized reference.
     reference, _, _ = e02.standardize(patches)
-    with np.load(verified(args.posterior, POSTERIOR), allow_pickle=False) as frozen:
+    with np.load(posterior_path, allow_pickle=False) as frozen:
         grids = {}
         for name in calibration.MODELS:
             print(f"Preparing {name} calibration grid for {len(proxy)} patches", flush=True)
@@ -121,7 +129,7 @@ def run(args):
                              "proposals": None, "retained_proposals": None, "max_weight": None, **result})
         if (rep-args.start+1) % 10 == 0:
             print(f"Completed repetition {rep+1}", flush=True)
-    config = {**protocol(args.nodes), "integration_seed": args.integration_seed}
+    config = {**config, "integration_seed": args.integration_seed}
     publish(args.output, rows, {"start": args.start, "repeats": args.repeats, "protocol": config})
 
 
@@ -135,7 +143,8 @@ def check_e02(summary, archive):
                 raise ValueError("E02 full-cohort bias/RMSE replay differs.")
 
 
-def collect(directory, output, repeats, e02_summary=Path("results/causal_e02/test_seed42/summary.csv")):
+def collect(directory, output, repeats, e02_summary=Path("results/causal_e02/test_seed42/summary.csv"), *,
+            experiment="E05 phase 2"):
     rows, configs = [], []
     for path in sorted(directory.glob("shard-*/run_summary.json")):
         meta = json.loads(path.read_text())
@@ -147,10 +156,13 @@ def collect(directory, output, repeats, e02_summary=Path("results/causal_e02/tes
     if len(keys) != len(rows) or keys != expected or not configs or any(c != configs[0] for c in configs):
         raise ValueError("Incomplete, duplicated, or incompatible shards; no combined report written.")
     rows.sort(key=lambda r: (int(r["repetition"]), float(r["a1"]), METHODS.index(r["method"])))
-    if repeats == TOTAL:
+    if configs[0].get("experiment", "E05 phase 2") != experiment:
+        raise ValueError(f"Expected {experiment} shards.")
+    verify_e02 = repeats == TOTAL and experiment == "E05 phase 2"
+    if verify_e02:
         check_e02(summarize(rows)[0], e02_summary)
     publish(output, rows, {"start": 0, "repeats": repeats, "shards": len(configs), "protocol": configs[0],
-                           "full_e02_controls_verified": repeats == TOTAL})
+                           "full_e02_controls_verified": verify_e02})
 
 
 if __name__ == "__main__":

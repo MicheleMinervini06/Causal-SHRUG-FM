@@ -114,19 +114,24 @@ def posterior(x, y, component, rng):
         "importance_ESS": ess, "maximum_weight": float(weights.max()), "n_fit": len(y)}
 
 
-def fit_models(reference, proxy, scores, seed):
+def fit_models(reference, proxy, scores, seed, *, positive_only=False):
     raw = np.column_stack((np.log1p(100 * proxy), scores))
     center, scale = np.nanmean(raw, axis=0), np.nanstd(raw, axis=0)
     if not np.isfinite(scale).all() or np.any(scale <= 0):
         raise ValueError("A calibration predictor has no usable training-fold variation.")
     x = design(proxy, scores, center, scale)
     wet = reference > 0
+    if positive_only and not np.all(wet & (reference < 1)):
+        raise ValueError("Positive-only beta calibration requires reference fractions strictly inside (0,1).")
     scored_wet = wet & np.isfinite(x).all(axis=1)
     components = (("presence", x[:, :2], wet.astype(float)),
                   ("proxy_only", x[wet, :2], reference[wet]),
                   ("with_scores", x[scored_wet], reference[scored_wet]))
     model, diagnostics = {"center": center, "scale": scale}, {}
     for i, (name, values, y) in enumerate(components):
+        if name == "presence" and positive_only:
+            model["positive_only"] = np.array(True)
+            continue
         rng = np.random.default_rng([seed, i])
         model[name], diagnostics[name] = posterior(values, y, name, rng)
     return model, diagnostics
@@ -135,7 +140,8 @@ def fit_models(reference, proxy, scores, seed):
 def predictive_components(model, proxy, scores, method):
     """One patch: aligned posterior draws of Pr(C>0), alpha, beta, for Phase 2."""
     x = design(np.array([proxy]), np.asarray(scores).reshape(1, -1), model["center"], model["scale"])[0]
-    present = expit(model["presence"] @ x[:2])
+    present = (np.ones(len(model["proxy_only"])) if model.get("positive_only", False)
+               else expit(model["presence"] @ x[:2]))
     if method not in MODELS:
         raise ValueError(f"Unknown calibration model: {method}")
     if method == "proxy_only" or not np.isfinite(x).all():
@@ -168,17 +174,23 @@ def metrics(rows):
 
 
 def run(directory, output, seed):
+    data = load_validation(directory)
+    return fit_validation(data, output, seed, source_hashes=INPUT_HASHES)
+
+
+def fit_validation(data, output, seed, *, source_hashes, burn_protocol=None):
     if output.exists():
         raise ValueError(f"Choose a new output directory: {output}")
-    rows, c, proxy, scores, folds = load_validation(directory)
+    rows, c, proxy, scores, folds = data
+    positive_only = burn_protocol is not None
     records, diagnostics = [], {}
     for fold in np.unique(folds):
         train = folds != fold
-        model, diag = fit_models(c[train], proxy[train], scores[train], seed + int(fold))
+        model, diag = fit_models(c[train], proxy[train], scores[train], seed + int(fold), positive_only=positive_only)
         diagnostics[f"fold_{fold}"] = diag
         for i in np.flatnonzero(~train):
             for method in MODELS:
-                records.append({"patch_id": rows[i]["patch_id"], "event_id": rows[i]["event_id"], "fold": int(fold),
+                records.append({"patch_id": rows[i]["patch_id"], "event_id": rows[i].get("event_id"), "fold": int(fold),
                                 "method": method, "reference_fraction": c[i], "predicted_fraction": proxy[i],
                                 "missing_score": not np.isfinite(scores[i]).all(),
                                 **predict(model, proxy[i], scores[i], c[i], method, [seed, 100, int(i)])})
@@ -188,7 +200,7 @@ def run(directory, output, seed):
         held = [r for r in records if r["method"] == method]
         summaries[method] = {"all": metrics(held),
                              "zero_proxy": metrics([r for r in held if r["predicted_fraction"] == 0])}
-    final, diagnostics["full_validation"] = fit_models(c, proxy, scores, seed + len(np.unique(folds)))
+    final, diagnostics["full_validation"] = fit_models(c, proxy, scores, seed + len(np.unique(folds)), positive_only=positive_only)
     output.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=output.parent) as tmp:
         stage = Path(tmp) / "calibration"
@@ -197,7 +209,7 @@ def run(directory, output, seed):
         e02.write_csv(stage / "validation_oof.csv", records)
         e02.write_json(stage / "calibration_summary.json", {
             "stage": "E05 phase 1, validation only", "schema_version": 1, "n_patches": len(c), "seed": seed,
-            "n_draws": N_DRAWS, "source_sha256": INPUT_HASHES, "implementation_sha256": e02.digest(Path(__file__)),
+            "n_draws": N_DRAWS, "source_sha256": source_hashes, "implementation_sha256": e02.digest(Path(__file__)),
             "git_commit": e02.git_commit(), "numpy": np.__version__, "scipy": scipy.__version__,
             "features": ["log1p(100 * predicted_fraction)", *FEATURES], "scaling": "training mean and population SD",
             "model": "logit presence; positive beta with logit mean, log precision. Independent Gaussian priors.",
@@ -208,6 +220,7 @@ def run(directory, output, seed):
             "missing": "Any missing score uses the full proxy-only predictive distribution.",
             "intervals": "equal-tailed 95% posterior predictive, including the point mass at zero",
             "diagnostics": diagnostics, "oof_metrics": summaries,
+            **(burn_protocol or {}),
             "output_sha256": {f: e02.digest(stage / f) for f in ("posterior.npz", "validation_oof.csv")}})
         stage.rename(output)
     print(f"Frozen calibration and held-out predictions: {output}")

@@ -1833,3 +1833,90 @@ missing scores, the supplied paired MCSEs and calibration ESS in
 `image_cases.csv` lists the nearest ranked patch to each score's 25th and 75th
 percentiles (ties ordered by patch ID), using the score file alone before
 reading verification impacts. These cases are for subsequent image review.
+
+## E07 — Burn-scar replication
+
+The first E07 comparison repeats E05 on all 263 burn-scar test scenes. The E06
+single-patch verification comparison is a later part of E07. The E05 comparison
+uses only the metrics and density exports. Original split and numeric sample
+index identify each scene. Density alignment is assumed because that export
+lacks scene coordinates. Burned area uses the full 512 × 512 scene denominator.
+
+Calibration uses the 54 validation scenes. All reference fractions lie inside
+(0, 1), so both models fit only the positive beta component. The proxy can be
+zero. Both mean and log precision use the E05 predictors and priors. The score
+model adds average member entropy (ensemble entropy minus mutual information),
+mutual information, and spatial density. Both task scores use the flood
+threshold of 0.05. All-zero entropy, MI and variance at that threshold trigger
+the same proxy-only fallback for both methods. The five validation folds are
+Ward clusters of scene centers on the unit sphere. Fire-event IDs are unavailable.
+The validation output contains fold assignments, predictive metrics and 8,192
+frozen posterior draws. To reproduce the fit in a fresh output directory:
+
+```powershell
+uv run --no-sync python -m experiments.burn_fraction_causal fit --output results/causal_e07/refit
+```
+
+### Launch the paired causal simulations
+
+From the **local project root**, publish the E07 source:
+
+```powershell
+git add README.md experiments/burn_fraction_causal.py experiments/fraction_calibration.py experiments/fraction_calibration_causal.py experiments/fraction_causal_posterior.py tests/test_fraction_calibration_causal.py scripts/hpc/burn_fraction_causal.sbatch
+git commit -m "Replicate E05 causal calibration on burn scars under E07"
+git push origin main
+```
+
+On **Anunna** from the project root:
+
+```bash
+git pull --ff-only
+mkdir -p results/causal_e07/inputs logs
+```
+
+In **local PowerShell** from the project root, copy the two audited exports and
+the reviewed validation fit. These inputs are outside Git.
+
+```powershell
+$inputsDir = 'results/burn_scars/export-audit/inputs'
+$fitDir = 'results/causal_e07/burn_calibration_seed42'
+scp "$inputsDir/burnscars_test_metrics.csv" "$inputsDir/burn_scars_density.csv" "$fitDir/posterior.npz" "$fitDir/calibration_summary.json" miner003@login.anunna.wur.nl:/lustre/nobackup/WUR/AIN/miner003/SHRUG-FM/results/causal_e07/inputs/
+```
+
+Back on **Anunna**, submit 100 tasks of 50 repetitions each, followed by collection:
+
+```bash
+inputs=results/causal_e07/inputs
+script=scripts/hpc/burn_fraction_causal.sbatch
+job=$(sbatch --parsable --array=0-99%4 "$script" --inputs "$inputs" --calibration "$inputs")
+root="results/causal_e07/array-$job"
+report=$(sbatch --parsable --dependency="afterok:$job" --output=logs/e07-report-%j.out --error=logs/e07-report-%j.err "$script" collect "$root")
+echo "array=$job report=$report output=$root/combined"
+squeue -r -j "$job"
+tail -n 30 -F "logs/e07-causal-${job}_0.out" "logs/e07-causal-${job}_0.err"
+```
+
+Jobs require the two audited CSV hashes and check the posterior against its fit
+summary. A failed inference stops its shard. To retry only failed indices on
+the same commit, export `E07_ROOT="$root"`, resubmit those indices, and submit
+a new collector after all shards finish. A collection with missing or duplicate
+estimates, mixed protocols or mixed posterior hashes fails.
+
+### Compare with the flood result after collection
+
+Use `combined/summary.csv` for oracle, raw proxy, proxy-only calibration and
+score-informed calibration. Use `combined/paired_comparisons.csv` for the
+within-dataset contrast (with scores minus proxy-only) and its paired 95% Monte
+Carlo interval. Compare both tables with `results/causal_e05/phase2-anunna-review/inputs/`.
+Read signed bias alongside distance from zero, RMSE alongside the raw proxy and
+oracle, and coverage alongside width. Examine confounded assignment first and
+randomized assignment as the control. The shared simulator fixes the true effect
+at 1 in both datasets. Sample size, reference support, ensemble and calibration
+population differ. Monte Carlo intervals quantify simulation uncertainty within
+each fixed cohort and do not measure generalization to new events.
+
+On implementation-check repetition 0, both 16 and 32 quadrature nodes passed
+the E05 importance-weight diagnostics. The largest change in a Bayesian effect
+estimate was 0.0080 (confounded, with scores). This check includes Monte Carlo
+sampling variation. If a small score advantage is decisive, check the paired
+contrast over multiple repetitions at higher resolution before interpreting it.
