@@ -102,7 +102,7 @@ def run(args):
 
 
 def simulate_cohort(args, patches, proxy, scores, posterior_path, config, *,
-                    max_batches=inference.STANDARD_BATCHES, recovery=None):
+                    max_batches=inference.STANDARD_BATCHES, recovery=None, excluded_cases=()):
     # Only the simulator and oracle below receive the standardized reference.
     reference, _, _ = e02.standardize(patches)
     with np.load(posterior_path, allow_pickle=False) as frozen:
@@ -113,9 +113,13 @@ def simulate_cohort(args, patches, proxy, scores, posterior_path, config, *,
             mean_c = np.einsum("ijk,ijk->j", grid, mass) / len(grid)
             grids[name] = grid, mass, mean_c
     rows = []
+    excluded = {(case["repetition"], case["a1"]) for case in excluded_cases}
     for rep in range(args.start, args.start + args.repeats):
         uniforms, noise = e02.simulation_draws(patches, 42, rep)
         for strength in e02.ASSIGNMENT_STRENGTHS:
+            if (rep, strength) in excluded:
+                print(f"Excluded unresolved repetition {rep}, a1={strength:g}, for all methods", flush=True)
+                continue
             t, y, _ = e02.simulate(reference, uniforms, noise, 0., strength)
             t, y = np.array(t), np.array(y)
             for method in METHODS:
@@ -136,6 +140,8 @@ def simulate_cohort(args, patches, proxy, scores, posterior_path, config, *,
     manifest = {"start": args.start, "repeats": args.repeats, "protocol": config}
     if recovery is not None:
         manifest["recovery"] = recovery
+    if excluded_cases:
+        manifest["excluded_cases"] = list(excluded_cases)
     publish(args.output, rows, manifest)
 
 
@@ -150,14 +156,22 @@ def check_e02(summary, archive):
 
 
 def collect(directory, output, repeats, e02_summary=Path("results/causal_e02/test_seed42/summary.csv"), *,
-            experiment="E05 phase 2"):
+            experiment="E05 phase 2", allowed_exclusions=()):
     rows, configs = [], []
     recoveries = {}
+    excluded = {}
     for path in sorted(directory.glob("shard-*/run_summary.json")):
         meta = json.loads(path.read_text())
         table = e02.read_rows(verified(path.with_name("estimates.csv"), meta["estimates_sha256"]))
         configs.append(meta["protocol"])
         rows.extend(table)
+        for case in meta.get("excluded_cases", []):
+            key = case["repetition"], case["a1"]
+            if (case not in allowed_exclusions or key in excluded
+                    or not meta["start"] <= key[0] < meta["start"] + meta["repeats"]
+                    or not 0 <= key[0] < repeats or key[1] not in e02.ASSIGNMENT_STRENGTHS):
+                raise ValueError("Unexpected or duplicate excluded repetition and assignment scenario.")
+            excluded[key] = case
         if "recovery" in meta:
             recovery = meta["recovery"]
             execution = recovery["execution_protocol"]
@@ -169,7 +183,8 @@ def collect(directory, output, repeats, e02_summary=Path("results/causal_e02/tes
             group = recoveries.setdefault(key, {**recovery, "shards": []})
             group["shards"].append(path.parent.name)
     keys = {(int(r["repetition"]), float(r["a1"]), r["method"]) for r in rows}
-    expected = {(i, a, m) for i in range(repeats) for a in e02.ASSIGNMENT_STRENGTHS for m in METHODS}
+    expected = {(i, a, m) for i in range(repeats) for a in e02.ASSIGNMENT_STRENGTHS
+                if (i, a) not in excluded for m in METHODS}
     if len(keys) != len(rows) or keys != expected or not configs or any(c != configs[0] for c in configs):
         raise ValueError("Incomplete, duplicated, or incompatible shards; no combined report written.")
     rows.sort(key=lambda r: (int(r["repetition"]), float(r["a1"]), METHODS.index(r["method"])))
@@ -183,6 +198,8 @@ def collect(directory, output, repeats, e02_summary=Path("results/causal_e02/tes
     if recoveries:
         manifest.update(recovery_runs=list(recoveries.values()),
                         fits_needing_extra_batches=sum(int(r["proposals"] or 0) > 262144 for r in rows))
+    if excluded:
+        manifest["excluded_cases"] = list(excluded.values())
     publish(output, rows, manifest)
 
 

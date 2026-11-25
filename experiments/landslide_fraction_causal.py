@@ -28,6 +28,12 @@ SUPPORT = ("Exported positive pixel counts divided by the full 64 x 64 reference
            "The exports do not provide invalid-pixel counts. Cohort conditional on landslide-containing patches.")
 SIZE = {"val": 41, "test": 68}
 RECOVERY_BATCHES = 18
+UNRESOLVED_CASE = {
+    "repetition": 3133, "a1": 1.0, "failed_method": "proxy_only",
+    "reason": "Importance sampling exhausted the recovery budget without meeting either threshold.",
+    "proposals": 9437184, "last_batch_ess": 72.8, "last_batch_max_weight": 0.08065,
+    "slurm_task": "44461988_62",
+}
 
 
 def load_split(inputs, split):
@@ -122,7 +128,8 @@ def simulate(args):
         original = recovery_protocol(args.resume_from, config)
         causal.simulate_cohort(args, patches, proxy, scores, posterior, original,
                                max_batches=RECOVERY_BATCHES,
-                               recovery={"execution_protocol": config, "max_batches": RECOVERY_BATCHES})
+                               recovery={"execution_protocol": config, "max_batches": RECOVERY_BATCHES},
+                               excluded_cases=(UNRESOLVED_CASE,) if args.omit_unresolved_3133 else ())
     else:
         causal.simulate_cohort(args, patches, proxy, scores, posterior, config)
 
@@ -143,18 +150,25 @@ def main():
     sim.add_argument("--repeats", type=int, default=causal.TOTAL)
     sim.add_argument("--resume-from", type=Path, metavar="RUN_SUMMARY",
                      help="Allow extra sampling batches and verify compatibility with an original shard.")
+    sim.add_argument("--omit-unresolved-3133", action="store_true",
+                     help="Omit repetition 3133 under confounding for all four methods during recovery.")
     combine = commands.add_parser("collect")
     combine.add_argument("directory", type=Path)
     combine.add_argument("--repeats", type=int, default=causal.TOTAL)
     args = parser.parse_args()
     if args.command == "collect":
-        causal.collect(args.directory, args.directory / "combined", args.repeats, experiment=EXPERIMENT)
+        causal.collect(args.directory, args.directory / "combined", args.repeats,
+                       experiment=EXPERIMENT, allowed_exclusions=(UNRESOLVED_CASE,))
     elif args.output.exists():
         parser.error(f"Choose a new output directory: {args.output}")
     elif args.command == "fit":
         fit(args)
     elif args.start < 0 or not 1 <= args.repeats <= causal.TOTAL - args.start or args.nodes < 2:
         parser.error("Invalid repetition range or quadrature order.")
+    elif args.omit_unresolved_3133 and (
+        not args.resume_from or not args.start <= UNRESOLVED_CASE["repetition"] < args.start + args.repeats
+    ):
+        parser.error("The exclusion requires recovery of the shard containing repetition 3133.")
     else:
         simulate(args)
 
