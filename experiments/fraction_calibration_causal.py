@@ -151,18 +151,23 @@ def check_e02(summary, archive):
 
 def collect(directory, output, repeats, e02_summary=Path("results/causal_e02/test_seed42/summary.csv"), *,
             experiment="E05 phase 2"):
-    rows, configs, recovered = [], [], []
-    recovery = None
+    rows, configs = [], []
+    recoveries = {}
     for path in sorted(directory.glob("shard-*/run_summary.json")):
         meta = json.loads(path.read_text())
         table = e02.read_rows(verified(path.with_name("estimates.csv"), meta["estimates_sha256"]))
         configs.append(meta["protocol"])
         rows.extend(table)
         if "recovery" in meta:
-            if recovery is not None and meta["recovery"] != recovery:
-                raise ValueError("Incompatible recovery settings across shards.")
             recovery = meta["recovery"]
-            recovered.append(path.parent.name)
+            execution = recovery["execution_protocol"]
+            original = meta["protocol"]
+            if {**execution, "git_commit": original["git_commit"],
+                    "implementation": original["implementation"]} != original:
+                raise ValueError("Recovery differs from the original statistical protocol.")
+            key = json.dumps(recovery, sort_keys=True)
+            group = recoveries.setdefault(key, {**recovery, "shards": []})
+            group["shards"].append(path.parent.name)
     keys = {(int(r["repetition"]), float(r["a1"]), r["method"]) for r in rows}
     expected = {(i, a, m) for i in range(repeats) for a in e02.ASSIGNMENT_STRENGTHS for m in METHODS}
     if len(keys) != len(rows) or keys != expected or not configs or any(c != configs[0] for c in configs):
@@ -175,8 +180,8 @@ def collect(directory, output, repeats, e02_summary=Path("results/causal_e02/tes
         check_e02(summarize(rows)[0], e02_summary)
     manifest = {"start": 0, "repeats": repeats, "shards": len(configs), "protocol": configs[0],
                 "full_e02_controls_verified": verify_e02}
-    if recovery is not None:
-        manifest.update(recovery=recovery, recovered_shards=recovered,
+    if recoveries:
+        manifest.update(recovery_runs=list(recoveries.values()),
                         fits_needing_extra_batches=sum(int(r["proposals"] or 0) > 262144 for r in rows))
     publish(output, rows, manifest)
 

@@ -27,7 +27,7 @@ STAGE = EXPERIMENT + ", validation only"
 SUPPORT = ("Exported positive pixel counts divided by the full 64 x 64 reference-mask grid. "
            "The exports do not provide invalid-pixel counts. Cohort conditional on landslide-containing patches.")
 SIZE = {"val": 41, "test": 68}
-RECOVERY_BATCHES = 12
+RECOVERY_BATCHES = 18
 
 
 def load_split(inputs, split):
