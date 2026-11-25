@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import numpy as np
+import numba
 import scipy
 
 from experiments import fraction_calibration as calibration
@@ -59,9 +60,9 @@ def protocol(nodes):
 def joint_protocol(nodes, *, hurdle):
     atom = " plus exact zero mass" if hurdle else ""
     return {"seed": 42, "nodes": nodes, "implementation": {p.name: e02.digest(p) for p in
-            (Path(__file__), Path(inference.__file__), Path(calibration.__file__), Path(e02.__file__),
-             Path(e02.__file__).with_name("synthetic_confounder.py"))},
-            "git_commit": e02.git_commit(), "numpy": np.__version__, "scipy": scipy.__version__,
+            (Path(__file__), Path(inference.__file__), Path(inference.fk.__file__), Path(calibration.__file__),
+             Path(e02.__file__), Path(e02.__file__).with_name("synthetic_confounder.py"))},
+            "git_commit": e02.git_commit(), "numpy": np.__version__, "scipy": scipy.__version__, "numba": numba.__version__,
             "inference": "latent fraction centered/scaled using only observed test proxy mean/SD; "
                          "Gaussian outcome intercept, tau, slope ~ independent N(0,5^2); log sigma ~ N(0,1); "
                          "randomized assignment known p=0.5; confounded logit intercept and slope ~ N(0,2.5^2). "

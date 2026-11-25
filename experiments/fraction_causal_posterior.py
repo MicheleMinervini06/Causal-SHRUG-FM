@@ -5,6 +5,7 @@ from scipy.optimize import minimize
 from scipy.special import betaincinv, expit
 from scipy.stats import multivariate_t, t as student_t
 
+from experiments import fast_kernels as fk
 from experiments.fraction_calibration import predictive_components
 
 
@@ -72,15 +73,7 @@ def proposal_distribution(t, y, mean_c, randomized):
 
 def patch_log_kernels(params, t, y, grid, masses, randomized):
     """Integrated patch kernels without the shared Gaussian normalization."""
-    v = params[:, :, None, None]
-    sigma = np.exp(v[:, 3])
-    resid = (y[:, None] - v[:, 0] - v[:, 1] * t[:, None] - v[:, 2] * grid) / sigma
-    likelihood = np.exp(-.5 * resid**2)
-    if not randomized:
-        likelihood *= expit((2*t[:, None] - 1) * (v[:, 4] + v[:, 5] * grid))
-    # Constant Gaussian and randomized-treatment normalizers cancel in the weights.
-    with np.errstate(divide="ignore"):
-        return np.log((likelihood * masses).sum(axis=2))
+    return fk.patch_log_kernels(params, t, y, grid, masses, randomized)
 
 
 def log_likelihood(params, t, y, grid, masses, randomized):
@@ -91,11 +84,8 @@ def log_likelihood(params, t, y, grid, masses, randomized):
 def row_probabilities(center, t, y, grid, masses, randomized):
     # Tilt the row proposal toward calibrations supported by this T,Y. A uniform
     # component preserves support; the weight below restores the frozen row prior.
-    log_row = np.empty(len(grid))
-    for start in range(0, len(grid), 128):
-        sl = slice(start, start + 128)
-        params = np.broadcast_to(center, (len(grid[sl]), len(center)))
-        log_row[sl] = log_likelihood(params, t, y, grid[sl], masses[sl], randomized)
+    params = np.broadcast_to(center, (len(grid), len(center)))
+    log_row = fk.log_likelihood_indexed(params, t, y, grid, masses, np.arange(len(grid)), randomized)
     row_p = np.exp(.7 * (log_row - log_row.max()))
     return .8 * row_p / row_p.sum() + .2 / len(grid)
 
@@ -114,9 +104,7 @@ def bayes(t, y, grid, masses, mean_c, randomized, seed, *, return_proposal=False
         indices = rng.choice(len(grid), size=size, p=row_p)
         log_w = -.5 * np.sum((params / prior_sd)**2, axis=1) - proposal.logpdf(params)
         log_w -= np.log(len(grid) * row_p[indices])
-        for start in range(0, size, 128):
-            sl = slice(start, start + 128)
-            log_w[sl] += log_likelihood(params[sl], t, y, grid[indices[sl]], masses[indices[sl]], randomized)
+        log_w += fk.log_likelihood_indexed(params, t, y, grid, masses, indices, randomized)
         w = np.exp(log_w - np.max(log_w))
         w /= w.sum()
         ess = 1 / (w @ w)

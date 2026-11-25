@@ -3,6 +3,7 @@
 import numpy as np
 from scipy.special import betaln, log_expit, logsumexp
 
+from experiments import fast_kernels as fk
 from experiments import fraction_calibration as calibration
 from experiments import fraction_causal_posterior as inference
 
@@ -11,6 +12,7 @@ from experiments import fraction_causal_posterior as inference
 # Units are treatment-effect units (the true effect is 1), also for interval width.
 MEAN_TOL, WIDTH_TOL = .005, .02
 BATCH_SIZES = tuple(4096 * 2**level for level in range(8))
+CHUNK = 8192
 
 
 def reference_evidence(model, proxy, scores, reference, method):
@@ -40,22 +42,10 @@ def batch(proposal, row_p, grid, masses, log_f, z, t, y, randomized, ids, size, 
     log_base -= np.log(len(grid) * row_p[indices])
     log_base -= len(t) * params[:, 3]
     weights = np.empty((size, 1 + len(ids)))
-    for start in range(0, size, 128):
-        sl = slice(start, start + 128)
+    for start in range(0, size, CHUNK):
+        sl = slice(start, start + CHUNK)
         rows, v = indices[sl], params[sl, :, None]
-        g, m = grid[rows], masses[rows]
-        marginal = inference.patch_log_kernels(params[sl], t, y, g, m, randomized)
-        # Repair floating-point underflow before subtracting a marginal log kernel.
-        h, j = np.where(~np.isfinite(marginal))
-        if len(h):
-            c = g[h, j]
-            eta = params[sl][h]
-            resid = (y[j, None] - eta[:, 0, None] - eta[:, 1, None]*t[j, None] - eta[:, 2, None]*c)
-            kernel = -.5*(resid / np.exp(eta[:, 3, None]))**2
-            if not randomized:
-                kernel += log_expit((2*t[j, None]-1)*(eta[:, 4, None]+eta[:, 5, None]*c))
-            with np.errstate(divide="ignore"):
-                marginal[h, j] = logsumexp(kernel + np.log(m[h, j]), axis=1)
+        marginal = fk.patch_log_kernels_indexed(params[sl], t, y, grid, masses, rows, randomized)
         base = log_base[sl] + marginal.sum(axis=1)
         exact = -.5*((y[ids] - v[:, 0] - v[:, 1]*t[ids] - v[:, 2]*z[ids]) / np.exp(v[:, 3]))**2
         if not randomized:

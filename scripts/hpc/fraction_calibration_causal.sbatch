@@ -14,7 +14,7 @@ module purge
 module load 2025 uv slurm
 set -u
 cd "${SLURM_SUBMIT_DIR:?Submit from the project root}"
-export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMBA_NUM_THREADS=1
 git rev-parse HEAD
 if [[ -n "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     root="results/causal_e05/phase2-array-${SLURM_ARRAY_JOB_ID}"

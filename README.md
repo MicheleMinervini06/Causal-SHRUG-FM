@@ -1923,6 +1923,16 @@ contrast over multiple repetitions at higher resolution before interpreting it.
 
 ### E07 single-patch verification
 
+The likelihood reads quadrature rows directly from the calibration bank using
+Numba. After pulling the updated lockfile, sync the existing Anunna environment
+once inside a compatible allocation (`main --constraint=gen2`, load `2025 uv`,
+then `uv sync --locked --extra encoder-cuda`). Slurm workers use one Numba
+thread each. The first call for a new CPU or array layout can include JIT compilation.
+On one local CPU thread, warm 4,096-proposal batches for E07 repetition 0
+took 0.47–0.54 s for all 263 reveals (previously 0.76–0.88 s), and 0.27–0.33 s
+for the final one or two reveals (previously 0.62–0.77 s). These are batch
+timings; the full Anunna run also spends time on proposals, retries and reporting.
+
 Use the same Anunna input directory as the E05 replication. Add the audited
 `burnscars_ncdd_k64.csv` and the reviewed E07 `summary.csv` from the completed
 causal run. From the project root, `bash scripts/hpc/burn_single_patch.sbatch submit`

@@ -32,7 +32,7 @@ module purge
 module load 2025 uv slurm
 set -u
 cd "${SLURM_SUBMIT_DIR:?Submit from the project root}"
-export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMBA_NUM_THREADS=1
 case "$1" in
     prepare) set -- prepare "results/causal_e07/verification-${SLURM_JOB_ID}" ;;
     run) set -- run "${2:?Missing verification root}" --start "$((20 * SLURM_ARRAY_TASK_ID))" --repeats 20 ;;
