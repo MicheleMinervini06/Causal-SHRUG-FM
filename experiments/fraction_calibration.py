@@ -62,8 +62,8 @@ def beta_shapes(parameters, x):
     return expit(eta) * precision, expit(-eta) * precision
 
 
-def posterior(x, y, component, rng):
-    """Correct a mode-based multivariate Student proposal by importance weighting."""
+def posterior_mode(x, y, component):
+    """Return the coefficient mode, inverse curvature and unnormalized log posterior."""
     d = x.shape[1]
     if component == "presence":
         loc = np.zeros(d)
@@ -102,7 +102,13 @@ def posterior(x, y, component, rng):
     step = 1e-4
     hessian = np.array([(gradient(fit.x + v) - gradient(fit.x - v)) / (2 * step)
                         for v in step * np.eye(len(loc))])
-    proposal = multivariate_t(loc=fit.x, shape=np.linalg.inv((hessian + hessian.T) / 2), df=7)
+    return fit.x, np.linalg.inv((hessian + hessian.T) / 2), log_target
+
+
+def posterior(x, y, component, rng):
+    """Correct a mode-based multivariate Student proposal by importance weighting."""
+    mode, covariance, log_target = posterior_mode(x, y, component)
+    proposal = multivariate_t(loc=mode, shape=covariance, df=7)
     candidates = proposal.rvs(size=2 * N_DRAWS, random_state=rng)
     log_w = np.concatenate([log_target(chunk) for chunk in np.array_split(candidates, 16)])
     log_w -= proposal.logpdf(candidates)
