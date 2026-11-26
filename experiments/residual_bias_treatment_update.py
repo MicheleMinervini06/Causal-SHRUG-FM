@@ -10,6 +10,7 @@ from numba import njit
 import numpy as np
 from scipy.special import expit, softmax
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
 from threadpoolctl import threadpool_limits
 
 from experiments import burn_fraction_causal as burn
@@ -21,6 +22,8 @@ POSTERIOR = Path("results/causal_e05/phase1_seed42/posterior.npz")
 RISK_SEED = 9109
 CONSTANT_SEED = 19042
 REPLICATION_PROTOCOL = Path(__file__).with_name("e09_treatment_replication_protocol.md")
+THRESHOLD_PROTOCOL = Path(__file__).with_name("e09_threshold_protocol.md")
+COMMON_THRESHOLDS = (.025, .05, .10, .20, .50)
 E07_POSTERIORS = {
     "burns": "b6b94e5ad63e2ecadfb34fc036f720d3f358a99703c1b6fced43f554b15a4a39",
     "landslides": "26e90f68fe5659faeb83966ec8e5537d2f9332493ee0d7f7fe002c690b5cde28",
@@ -82,27 +85,24 @@ def conditional_nodes(grid, mass, intercept, slope):
 
 
 @njit
-def threshold_counts(grid, cdf, treatment, weights, rows, uniforms, threshold):
-    first_half = 0
-    second_half = 0
+def threshold_counts(grid, cdf, treatment, weights, rows, uniforms, thresholds):
+    counts = np.zeros((2, len(thresholds)), dtype=np.int64)
     for draw, row in enumerate(rows):
         bias = 0.
         for patch in range(len(weights)):
             index = np.searchsorted(cdf[treatment[patch], patch, row], uniforms[draw, patch], side="right")
             bias += weights[patch] * grid[row, patch, index]
-        if abs(bias) > threshold:
-            if draw < len(rows)//2:
-                first_half += 1
-            else:
-                second_half += 1
-    return first_half, second_half
+        half = int(draw >= len(rows)//2)
+        for j in range(len(thresholds)):
+            counts[half, j] += abs(bias) > thresholds[j]
+    return counts
 
 
-def predict(grid, mass, treatments, weights, assignment, risk_draws):
+def predict(grid, mass, treatments, weights, assignment, risk_draws, thresholds):
     evidence, means, cdf = conditional_nodes(grid, mass, *assignment)
     uniform_rows = len(evidence) == 1
     mean_bias = np.empty(len(treatments))
-    risk_counts = np.empty((len(treatments), 2), dtype=int)
+    risk_counts = np.empty((len(treatments), 2, len(thresholds)), dtype=int)
     ess = np.full(len(treatments), len(grid), dtype=float)
     if uniform_rows:
         mean_bias[:] = weights @ means[0].mean(axis=0)
@@ -133,7 +133,7 @@ def predict(grid, mass, treatments, weights, assignment, risk_draws):
                 rows = np.searchsorted(row_cdf, row_uniform, side="right")
                 observed = treatments[rep].astype(int)
             risk_counts[rep] = threshold_counts(grid, cdf, observed, weights[rep], rows,
-                rng.random((risk_draws, grid.shape[1])), warning.THRESHOLD)
+                rng.random((risk_draws, grid.shape[1])), thresholds)
     return mean_bias, risk_counts, ess
 
 
@@ -151,8 +151,9 @@ def synthetic_check():
     np.testing.assert_allclose(randomized_cdf[..., 0], .5, atol=1e-14)
     np.testing.assert_allclose(randomized_cdf[..., 1], 1., atol=1e-14)
     uniforms = np.tile([.5, .5], (4, 1))
-    assert threshold_counts(grid, cdf, np.array([0, 1]), np.array([-1., 1.]),
-                            np.zeros(4, dtype=int), uniforms, .05) == (2, 2)
+    counts = threshold_counts(grid, cdf, np.array([0, 1]), np.array([-1., 1.]),
+                              np.zeros(4, dtype=int), uniforms, np.array([.05, .30]))
+    np.testing.assert_array_equal(counts, [[2, 0], [2, 0]])
 
 
 def treatment_draws(patches, standardized, n, seed, strength):
@@ -160,14 +161,12 @@ def treatment_draws(patches, standardized, n, seed, strength):
     return (uniforms < expit(strength*standardized)).astype(float)
 
 
-def validation_constants(patches, proxy, reference):
-    """Fix the constant probability forecasts using validation labels and independent assignments."""
-    constants = {}
+def validation_biases(patches, proxy, reference):
+    absolute_bias = {}
     for strength in (0, 1):
         treatment = treatment_draws(patches, reference, e05.TOTAL, CONSTANT_SEED, strength)
-        bias = warning.partial_weights(treatment, proxy) @ reference
-        constants[strength] = float(np.mean(abs(bias) > warning.THRESHOLD))
-    return constants
+        absolute_bias[strength] = abs(warning.partial_weights(treatment, proxy) @ reference)
+    return absolute_bias
 
 
 def brier(probability, event, draws):
@@ -181,12 +180,53 @@ def paired_interval(difference):
     return mean, mean-radius, mean+radius
 
 
+def threshold_summary(predictions, scenarios, true_bias, thresholds, names, constants, draws):
+    records, arrays = [], {}
+    order = np.argsort(thresholds)
+    for scenario, (strength, _, _) in scenarios.items():
+        bias = true_bias[strength]
+        event = abs(bias[:, None]) > thresholds
+        arrays[f"{scenario}_true_bias"] = bias
+        constant_loss = (constants[strength]-event)**2
+        base_counts = predictions[scenario]["proxy_only"][1]
+        base_loss = brier(base_counts.sum(axis=1)/draws, event, draws)
+        for method, (_, counts, _) in predictions[scenario].items():
+            risk = counts.sum(axis=1)/draws
+            half = counts[:, 0]/(draws//2)
+            if np.any(np.diff(risk[:, order], axis=1) > 0):
+                raise ValueError("Bias exceedance risk must decrease with the threshold.")
+            arrays[f"{scenario}_{method}_risk"] = risk
+            loss = brier(risk, event, draws)
+            for j, (name, cutoff) in enumerate(zip(names, thresholds, strict=True)):
+                cases = int(event[:, j].sum())
+                controls = len(bias)-cases
+                delta, lo, hi = paired_interval(loss[:, j]-base_loss[:, j])
+                constant_delta, constant_lo, constant_hi = paired_interval(loss[:, j]-constant_loss[:, j])
+                records.append(dict(scenario=scenario, method=method, threshold_id=name, threshold=cutoff,
+                    above=cases, at_or_below=controls, auc=roc_auc_score(event[:, j], risk[:, j])
+                    if cases and controls else None,
+                    mean_risk=risk[:, j].mean(), brier=loss[:, j].mean(),
+                    brier_half=brier(half[:, j], event[:, j], draws//2).mean(),
+                    delta_brier=delta, delta_brier_lo=lo, delta_brier_hi=hi, constant=constants[strength][j],
+                    constant_brier=constant_loss[:, j].mean(), delta_brier_constant=constant_delta,
+                    delta_brier_constant_lo=constant_lo, delta_brier_constant_hi=constant_hi))
+    return records, arrays
+
+
 def run(args):
     synthetic_check()
     validation, validation_proxy, _, val_hash = load(args.dataset, "val")
     vref, _, vscale = e02.standardize(validation)
     vref = np.asarray(vref)
-    constants = validation_constants(validation, validation_proxy, vref)
+    validation_bias = validation_biases(validation, validation_proxy, vref)
+    if args.threshold_sensitivity:
+        thresholds = np.r_[COMMON_THRESHOLDS, np.quantile(validation_bias[1], [.5, .75])]
+        names = [*(f"fixed_{cutoff:g}" for cutoff in COMMON_THRESHOLDS), "validation_q50", "validation_q75"]
+    else:
+        thresholds = np.array([warning.THRESHOLD])
+        names = ["fixed_0.05"]
+    default_threshold = names.index("fixed_0.05")
+    constants = {strength: (bias[:, None] > thresholds).mean(axis=0) for strength, bias in validation_bias.items()}
     vt = treatment_draws(validation, vref, 1, 9042, 1)[0]
     fit = LogisticRegression(C=1.).fit(vref[:, None], vt)
     posterior, posterior_hashes = verified_posterior(args.dataset, len(validation))
@@ -215,7 +255,7 @@ def run(args):
                 start = monotonic()
                 normalized = (grid-scaling["center"])/scaling["scale"]
                 predictions[name][method] = predict(normalized, mass, treatment[strength],
-                                                     weights[strength], assignment, args.risk_draws)
+                                                     weights[strength], assignment, args.risk_draws, thresholds)
                 del normalized
                 times[f"{name}_{method}"] = monotonic()-start
                 print(f"{name} {method}: {args.repeats} assignments in {monotonic()-start:.1f}s", flush=True)
@@ -225,11 +265,12 @@ def run(args):
     for scenario, (strength, _, _) in scenarios.items():
         truth = true_bias[strength]
         event = abs(truth) > warning.THRESHOLD
-        constant = constants[strength]
+        constant = constants[strength][default_threshold]
         constant_loss = (constant-event)**2
         base, base_counts, _ = predictions[scenario]["proxy_only"]
-        base_loss = brier(base_counts.sum(axis=1)/args.risk_draws, event, args.risk_draws)
+        base_loss = brier(base_counts[:, :, default_threshold].sum(axis=1)/args.risk_draws, event, args.risk_draws)
         for method, (mean, counts, ess) in predictions[scenario].items():
+            counts = counts[:, :, default_threshold]
             risk = counts.sum(axis=1)/args.risk_draws
             half = counts[:, 0]/(args.risk_draws//2)
             loss = brier(risk, event, args.risk_draws)
@@ -253,13 +294,20 @@ def run(args):
         stage.mkdir()
         e02.write_csv(stage/"summary.csv", rows)
         e02.write_csv(stage/"repetitions.csv", repetitions)
+        if args.threshold_sensitivity:
+            threshold_rows, arrays = threshold_summary(predictions, scenarios, true_bias,
+                                                      thresholds, names, constants, args.risk_draws)
+            e02.write_csv(stage/"threshold_summary.csv", threshold_rows)
+            np.savez_compressed(stage/"threshold_risks.npz", thresholds=thresholds, threshold_ids=names, **arrays)
         e02.write_json(stage/"config.json", dict(dataset=args.dataset, inputs={**val_hash, **test_hash, **posterior_hashes},
             repeats=args.repeats, nodes=args.nodes, risk_draws=args.risk_draws, risk_seed=RISK_SEED,
-            constant_seed=CONSTANT_SEED, constant_repeats=e05.TOTAL, validation_constant=constants,
+            constant_seed=CONSTANT_SEED, constant_repeats=e05.TOTAL,
+            validation_constant={k: v[default_threshold] for k, v in constants.items()},
+            threshold_grid=dict(zip(names, thresholds, strict=True)),
             threshold=warning.THRESHOLD, scenarios=scenarios, seconds=times, commit=e02.git_commit(),
             implementation_sha256={p.name: e02.digest(p) for p in (Path(__file__),
                 Path(__file__).with_name("e09_treatment_update_protocol.md"), REPLICATION_PROTOCOL, Path(warning.__file__),
-                Path(e05.inference.__file__), Path(e05.calibration.__file__), Path(e02.__file__),
+                THRESHOLD_PROTOCOL, Path(e05.inference.__file__), Path(e05.calibration.__file__), Path(e02.__file__),
                 Path(burn.__file__), Path(landslides.__file__))}))
         stage.rename(args.output)
 
@@ -271,9 +319,12 @@ if __name__ == "__main__":
     parser.add_argument("--repeats", type=int, default=5000)
     parser.add_argument("--nodes", type=int, default=16)
     parser.add_argument("--risk-draws", type=int, default=512)
+    parser.add_argument("--threshold-sensitivity", action="store_true")
     args = parser.parse_args()
     if args.output is None:
         name = "treatment_update" if args.dataset == "floods" else f"treatment_update_{args.dataset}"
+        if args.threshold_sensitivity:
+            name = f"threshold_sensitivity_{args.dataset}"
         args.output = Path("results/causal_e09")/name
     if args.output.exists() or not 2 <= args.repeats <= 5000 or args.nodes < 2:
         parser.error("Use a new output directory, 2–5000 repeats and at least two nodes.")
