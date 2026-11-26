@@ -8,12 +8,15 @@ import numpy as np
 from scipy.stats import t as student_t
 from threadpoolctl import threadpool_limits
 
+from experiments import residual_bias_warning as warning
 from experiments import single_patch_causal as e06
 from experiments import verification_scores as verification
 
 e05, e02 = verification.e05, verification.e02
 TEST_SCORES = Path("results/segmentation_runs/gate-test-pred-job-44220183-analysis/inputs/gate_scores.csv")
 PROTOCOL = Path(__file__).with_name("e06_fixed_budget_protocol.md")
+REPLICATION_PROTOCOL = Path(__file__).with_name("e06_fixed_budget_replication_protocol.md")
+COHORT_SIZES = {"floods": 88, "burns": 263, "landslides": 68}
 BUDGETS = (5, 10)
 SELECTION_SEED = 60642
 SIMULATION_SEED = 42
@@ -41,11 +44,17 @@ def adjusted_effect(treatment, outcome, fraction):
 
 
 def run(args):
-    scored = verification.scored_cohort(args.test_scores)
-    ids = list(scored)
-    patches = list(scored.values())
-    if len(ids) != 88:
-        raise ValueError("Expected the complete 88-patch E06 cohort.")
+    if args.dataset == "floods":
+        path = args.test_scores or TEST_SCORES
+        patches = list(verification.scored_cohort(path).values())
+        sources = {str(path): e05.TEST_SCORES}
+    else:
+        patches, signals, _, sources = warning.load(args.dataset, "test")
+        for patch, values in zip(patches, signals, strict=True):
+            patch.update(zip(verification.SCORES, (float(v) if np.isfinite(v) else None for v in values), strict=True))
+    ids = [patch["patch_id"] for patch in patches]
+    if len(set(ids)) != len(ids) or len(ids) != COHORT_SIZES[args.dataset]:
+        raise ValueError(f"Expected the complete {args.dataset} test cohort with unique patch IDs.")
     reference = np.array([p["reference_fraction"] for p in patches])
     raw_proxy = np.array([p["predicted_fraction"] for p in patches])
     standard_reference, _, scaling = e02.standardize(patches)
@@ -101,27 +110,34 @@ def run(args):
         e02.write_csv(stage/"summary.csv", summaries)
         e02.write_csv(stage/"paired_comparisons.csv", comparisons)
         e02.write_csv(stage/"rankings.csv", [
-            dict(policy=policy, rank=rank, patch_id=ids[i], event_id=patches[i]["event_id"],
+            dict(policy=policy, rank=rank, patch_id=ids[i], event_id=patches[i].get("event_id"),
                  score=patches[i][policy])
             for policy, order in rankings.items() for rank, i in enumerate(order, 1)])
         np.savez_compressed(stage/"repetitions.npz", **arrays)
         e02.write_json(stage/"config.json", dict(
-            n_patches=len(ids), eligible=[ids[i] for i in eligible], repeats=args.repeats,
+            dataset=args.dataset, n_patches=len(ids), eligible=[ids[i] for i in eligible], repeats=args.repeats,
             seed=SIMULATION_SEED, selection_seed=SELECTION_SEED, budgets=BUDGETS, policies=POLICIES,
-            scaling=scaling, test_scores_sha256=e05.TEST_SCORES, git_commit=e02.git_commit(),
+            scaling=scaling, source_sha256=sources, git_commit=e02.git_commit(),
             estimates_columns=["estimate", "lower95", "upper95"],
-            implementation_sha256={p.name: e02.digest(p) for p in (Path(__file__), PROTOCOL,
+            implementation_sha256={p.name: e02.digest(p) for p in (Path(__file__), PROTOCOL, REPLICATION_PROTOCOL,
                 Path(verification.__file__), Path(e05.__file__), Path(e06.__file__), Path(e02.__file__),
-                Path(e05.inference.__file__))}))
+                Path(e05.inference.__file__), Path(warning.__file__), Path(warning.burn.burn.__file__),
+                Path(warning.land.__file__))}))
         stage.rename(args.output)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--test-scores", type=Path, default=TEST_SCORES)
-    parser.add_argument("--output", type=Path, default=Path("results/causal_e06/fixed_budget_seed42"))
+    parser.add_argument("--dataset", choices=tuple(COHORT_SIZES), default="floods")
+    parser.add_argument("--test-scores", type=Path)
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--repeats", type=int, default=e05.TOTAL)
     args = parser.parse_args()
+    if args.test_scores and args.dataset != "floods":
+        parser.error("--test-scores sets the flood score export.")
+    if args.output is None:
+        dataset_suffix = "" if args.dataset == "floods" else f"_{args.dataset}"
+        args.output = Path("results/causal_e06")/f"fixed_budget{dataset_suffix}_seed42"
     if args.output.exists() or not 2 <= args.repeats <= e05.TOTAL:
         parser.error(f"Use a new output directory and 2–{e05.TOTAL} repetitions.")
     with threadpool_limits(limits=1):

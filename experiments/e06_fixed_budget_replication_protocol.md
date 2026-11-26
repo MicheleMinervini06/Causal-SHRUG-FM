@@ -1,0 +1,5 @@
+# E06 · Fixed-budget verification on Burn Scars and Landslides
+
+Apply the [flood protocol](e06_fixed_budget_protocol.md) to the archived E07 test cohorts, retaining all 263 Burn Scars and 68 Landslides patches. Keep the five score policies, common eligibility, two budgets and random-order rule, 5,000 assignments per scenario, seeds, and OLS estimator. Five or ten checked patches represent different proportions of the two cohorts. Interpret the score-versus-random contrast within each dataset and budget.
+
+Use the E09 loader's verified E07 inputs and score directions. Within-split alignment of the auxiliary density and embedding exports follows the original assumption. The primary comparison remains RMSE with confounded assignment. Keep Landslides repetition 3133, which was excluded from the earlier E07 joint Bayesian run because its numerical diagnostics failed. Here OLS can use that draw. For the Landslides control check only, also recompute the confounded control metrics on the 4,999 archived assignments to verify agreement.
